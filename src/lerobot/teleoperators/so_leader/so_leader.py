@@ -40,6 +40,7 @@ class SOLeader(Teleoperator):
     def __init__(self, config: SOLeaderTeleopConfig):
         super().__init__(config)
         self.config = config
+        self._manual_control_enabled = True
         norm_mode_body = MotorNormMode.DEGREES if config.use_degrees else MotorNormMode.RANGE_M100_100
         self.bus = FeetechMotorsBus(
             port=self.config.port,
@@ -127,9 +128,22 @@ class SOLeader(Teleoperator):
 
     def configure(self) -> None:
         self.bus.disable_torque()
+        self._manual_control_enabled = True
         self.bus.configure_motors()
         for motor in self.bus.motors:
             self.bus.write("Operating_Mode", motor, OperatingMode.POSITION.value)
+
+    @check_if_not_connected
+    def set_manual_control(self, enabled: bool) -> None:
+        if enabled:
+            if not self._manual_control_enabled:
+                self.bus.disable_torque()
+                self._manual_control_enabled = True
+            return
+
+        if self._manual_control_enabled:
+            self.bus.enable_torque()
+            self._manual_control_enabled = False
 
     def setup_motors(self) -> None:
         for motor in reversed(self.bus.motors):
@@ -150,6 +164,7 @@ class SOLeader(Teleoperator):
     def send_feedback(self, feedback: dict[str, float]) -> None:
         # For phase-A dual-arm execution, reuse leader as a commanded arm by
         # mapping `{joint}.pos` to motor goal positions.
+        self.set_manual_control(False)
         goal_pos = {
             key.removesuffix(".pos"): val for key, val in feedback.items() if key.endswith(".pos")
         }

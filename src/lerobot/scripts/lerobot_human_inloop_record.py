@@ -17,9 +17,12 @@
 """
 Records with policy execution and teleop-device action mirroring enabled.
 
-Phase A goal:
+Phase A/B goals:
 - Same policy action is executed on the follower robot and mirrored to the teleop arm.
+- Keyboard-toggled intervention lets teleop temporarily take over execution.
 """
+
+import logging
 
 from lerobot.configs import parser
 from lerobot.scripts.lerobot_record import RecordConfig, record
@@ -34,6 +37,13 @@ def human_inloop_record(cfg: RecordConfig):
         raise ValueError("`lerobot-human-inloop-record` requires `policy` config.")
 
     cfg.policy_sync_to_teleop = True
+    cfg.intervention_state_machine_enabled = True
+    logging.info(
+        "Intervention state machine enabled. Press '%s' to toggle takeover. "
+        "Recorded `action` is the executed action. "
+        "Policy output is stored in `complementary_info.policy_action`.",
+        cfg.intervention_toggle_key,
+    )
     return record(cfg)
 
 

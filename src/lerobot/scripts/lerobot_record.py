@@ -70,6 +70,8 @@ from pathlib import Path
 from pprint import pformat
 from typing import Any
 
+import numpy as np
+
 from lerobot.cameras import (  # noqa: F401
     CameraConfig,  # noqa: F401
 )
@@ -215,6 +217,10 @@ class RecordConfig:
     policy_sync_to_teleop: bool = False
     # Use parallel dispatch to reduce action broadcast latency when syncing policy to teleop.
     policy_sync_parallel: bool = True
+    # Enable S0/S1/S2 intervention state machine when policy + teleop are both available.
+    intervention_state_machine_enabled: bool = True
+    # Keyboard key used to toggle entering/leaving intervention.
+    intervention_toggle_key: str = "i"
 
     def __post_init__(self):
         # HACK: We parse again the cli args here to get the pretrained path if there was one.
@@ -228,6 +234,8 @@ class RecordConfig:
 
         if self.teleop is None and self.policy is None:
             raise ValueError("Choose a policy, a teleoperator or both to control the robot")
+        if not self.intervention_toggle_key or len(self.intervention_toggle_key) != 1:
+            raise ValueError("`intervention_toggle_key` must be a single character.")
 
     @classmethod
     def __get_path_fields__(cls) -> list[str]:
@@ -259,6 +267,11 @@ class PolicySyncDualArmExecutor:
     def shutdown(self) -> None:
         if self._pool is not None:
             self._pool.shutdown(wait=True)
+
+
+INTERVENTION_STATE_POLICY = 0.0
+INTERVENTION_STATE_ACTIVE = 1.0
+INTERVENTION_STATE_RELEASE = 2.0
 
 
 """ --------------- record_loop() data flow --------------------------
@@ -315,6 +328,7 @@ def record_loop(
     display_data: bool = False,
     display_compressed_images: bool = False,
     policy_sync_executor: PolicySyncDualArmExecutor | None = None,
+    intervention_state_machine_enabled: bool = True,
 ):
     if dataset is not None and dataset.fps != fps:
         raise ValueError(f"The dataset fps should be equal to requested fps ({dataset.fps} != {fps}).")
@@ -344,11 +358,47 @@ def record_loop(
                 "For multi-teleop, the list must contain exactly one KeyboardTeleop and one arm teleoperator. Currently only supported for LeKiwi robot."
             )
 
+    if dataset is None and policy is not None:
+        raise ValueError("Policy-driven recording requires a dataset for feature mapping.")
+
+    action_feature_names = dataset.features[ACTION]["names"] if dataset is not None else None
+    if action_feature_names is None:
+        if hasattr(robot.action_features, "keys"):
+            action_feature_names = list(robot.action_features.keys())
+        else:
+            action_feature_names = list(robot.action_features)
+    zero_policy_action = {name: 0.0 for name in action_feature_names}
+    has_teleop = isinstance(teleop, Teleoperator) or isinstance(teleop, list)
+    intervention_enabled = intervention_state_machine_enabled and policy is not None and has_teleop
+    intervention_state = INTERVENTION_STATE_POLICY
+    last_teleop_action: RobotAction | None = None
+    teleop_fallback_warned = False
+
+    teleop_arm_for_mode_switch: Any | None = None
+    if isinstance(teleop, Teleoperator):
+        teleop_arm_for_mode_switch = teleop
+    elif isinstance(teleop, list):
+        teleop_arm_for_mode_switch = teleop_arm
+
+    def set_teleop_manual_control(enabled: bool) -> None:
+        if policy_sync_executor is None or teleop_arm_for_mode_switch is None:
+            return
+        if not hasattr(teleop_arm_for_mode_switch, "set_manual_control"):
+            return
+        try:
+            teleop_arm_for_mode_switch.set_manual_control(enabled)
+        except Exception:
+            logging.exception("Failed to switch teleop manual-control mode to %s", enabled)
+
     # Reset policy and processor if they are provided
     if policy is not None and preprocessor is not None and postprocessor is not None:
         policy.reset()
         preprocessor.reset()
         postprocessor.reset()
+
+    if intervention_enabled:
+        # Start in S0: policy drives both arms, teleop arm should accept feedback commands.
+        set_teleop_manual_control(False)
 
     timestamp = 0
     start_episode_t = time.perf_counter()
@@ -359,18 +409,34 @@ def record_loop(
             events["exit_early"] = False
             break
 
+        if events.get("toggle_intervention", False):
+            events["toggle_intervention"] = False
+            if intervention_enabled:
+                if intervention_state == INTERVENTION_STATE_POLICY:
+                    intervention_state = INTERVENTION_STATE_ACTIVE
+                    set_teleop_manual_control(True)
+                    logging.info("Intervention enabled (S1): teleop actions now override policy execution.")
+                else:
+                    intervention_state = INTERVENTION_STATE_RELEASE
+                    set_teleop_manual_control(False)
+                    logging.info("Intervention release requested (S2): returning control to policy.")
+            else:
+                logging.info("Intervention toggle ignored because policy+teleop are not both active.")
+
         # Get robot observation
         obs = robot.get_observation()
 
         # Applies a pipeline to the raw robot observation, default is IdentityProcessor
         obs_processed = robot_observation_processor(obs)
 
-        if policy is not None or dataset is not None:
+        if dataset is not None:
             observation_frame = build_dataset_frame(dataset.features, obs_processed, prefix=OBS_STR)
 
-        # Get action from either policy or teleop
+        # Get action from policy and/or teleop
+        act_processed_policy: RobotAction | None = None
+        act_processed_teleop: RobotAction | None = None
         if policy is not None and preprocessor is not None and postprocessor is not None:
-            action_values = predict_action(
+            policy_action = predict_action(
                 observation=observation_frame,
                 policy=policy,
                 device=get_safe_torch_device(policy.config.device),
@@ -381,22 +447,23 @@ def record_loop(
                 robot_type=robot.robot_type,
             )
 
-            act_processed_policy: RobotAction = make_robot_action(action_values, dataset.features)
+            act_processed_policy = make_robot_action(policy_action, dataset.features)
 
-        elif policy is None and isinstance(teleop, Teleoperator):
+        if isinstance(teleop, Teleoperator):
             act = teleop.get_action()
 
             # Applies a pipeline to the raw teleop action, default is IdentityProcessor
             act_processed_teleop = teleop_action_processor((act, obs))
 
-        elif policy is None and isinstance(teleop, list):
+        elif isinstance(teleop, list):
             arm_action = teleop_arm.get_action()
             arm_action = {f"arm_{k}": v for k, v in arm_action.items()}
             keyboard_action = teleop_keyboard.get_action()
             base_action = robot._from_keyboard_to_base_action(keyboard_action)
             act = {**arm_action, **base_action} if len(base_action) > 0 else arm_action
             act_processed_teleop = teleop_action_processor((act, obs))
-        else:
+
+        if act_processed_policy is None and act_processed_teleop is None:
             logging.info(
                 "No policy or teleoperator provided, skipping action generation."
                 "This is likely to happen when resetting the environment without a teleop device."
@@ -404,19 +471,50 @@ def record_loop(
             )
             continue
 
-        # Applies a pipeline to the action, default is IdentityProcessor
-        if policy is not None and act_processed_policy is not None:
-            action_values = act_processed_policy
-            robot_action_to_send = robot_action_processor((act_processed_policy, obs))
+        if act_processed_teleop is not None:
+            last_teleop_action = act_processed_teleop
+            teleop_fallback_warned = False
+
+        policy_action_for_storage = act_processed_policy if act_processed_policy is not None else zero_policy_action
+
+        is_intervention = 0.0
+        if intervention_enabled and intervention_state == INTERVENTION_STATE_ACTIVE:
+            is_intervention = 1.0
+            if act_processed_teleop is not None:
+                action_values = act_processed_teleop
+            elif last_teleop_action is not None:
+                action_values = last_teleop_action
+                if not teleop_fallback_warned:
+                    logging.warning(
+                        "Intervention is active but no fresh teleop action is available; reusing last teleop action."
+                    )
+                    teleop_fallback_warned = True
+            elif act_processed_policy is not None:
+                action_values = act_processed_policy
+                if not teleop_fallback_warned:
+                    logging.warning(
+                        "Intervention is active but teleop action is unavailable; falling back to policy action."
+                    )
+                    teleop_fallback_warned = True
+            else:
+                action_values = zero_policy_action
+                if not teleop_fallback_warned:
+                    logging.warning(
+                        "Intervention is active but no teleop/policy action is available; sending zero action."
+                    )
+                    teleop_fallback_warned = True
         else:
-            action_values = act_processed_teleop
-            robot_action_to_send = robot_action_processor((act_processed_teleop, obs))
+            action_values = act_processed_policy if act_processed_policy is not None else act_processed_teleop
+
+        # Applies a pipeline to the action, default is IdentityProcessor
+        robot_action_to_send = robot_action_processor((action_values, obs))
 
         # Send action to robot
         # Action can eventually be clipped using `max_relative_target`,
         # so action actually sent is saved in the dataset. action = postprocessor.process(action)
         # TODO(steven, pepijn, adil): we should use a pipeline step to clip the action, so the sent action is the action that we input to the robot.
-        if policy is not None and policy_sync_executor is not None:
+        selected_from_policy = act_processed_policy is not None and action_values is act_processed_policy
+        if policy_sync_executor is not None and selected_from_policy:
             _sent_action = policy_sync_executor.send_action(robot_action_to_send)
         else:
             _sent_action = robot.send_action(robot_action_to_send)
@@ -424,13 +522,24 @@ def record_loop(
         # Write to dataset
         if dataset is not None:
             action_frame = build_dataset_frame(dataset.features, action_values, prefix=ACTION)
-            frame = {**observation_frame, **action_frame, "task": single_task}
+            policy_action_frame = build_dataset_frame(
+                dataset.features, policy_action_for_storage, prefix="complementary_info.policy_action"
+            )
+            frame = {**observation_frame, **action_frame, **policy_action_frame, "task": single_task}
+
+            if "complementary_info.is_intervention" in dataset.features:
+                frame["complementary_info.is_intervention"] = np.array([is_intervention], dtype=np.float32)
+            if "complementary_info.state" in dataset.features:
+                frame["complementary_info.state"] = np.array([intervention_state], dtype=np.float32)
             dataset.add_frame(frame)
 
         if display_data:
             log_rerun_data(
                 observation=obs_processed, action=action_values, compress_images=display_compressed_images
             )
+
+        if intervention_state == INTERVENTION_STATE_RELEASE:
+            intervention_state = INTERVENTION_STATE_POLICY
 
         dt_s = time.perf_counter() - start_loop_t
         precise_sleep(max(1 / fps - dt_s, 0.0))
@@ -469,6 +578,27 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
             use_videos=cfg.dataset.video,
         ),
     )
+    if cfg.intervention_state_machine_enabled and cfg.policy is not None and cfg.teleop is not None:
+        action_names = dataset_features[ACTION]["names"]
+        if action_names is None:
+            action_names = list(robot.action_features)
+        else:
+            action_names = list(action_names)
+        dataset_features["complementary_info.policy_action"] = {
+            "dtype": "float32",
+            "shape": (len(action_names),),
+            "names": action_names,
+        }
+        dataset_features["complementary_info.is_intervention"] = {
+            "dtype": "float32",
+            "shape": (1,),
+            "names": ["is_intervention"],
+        }
+        dataset_features["complementary_info.state"] = {
+            "dtype": "float32",
+            "shape": (1,),
+            "names": ["state"],
+        }
 
     dataset = None
     listener = None
@@ -537,7 +667,7 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
                 parallel_dispatch=cfg.policy_sync_parallel,
             )
 
-        listener, events = init_keyboard_listener()
+        listener, events = init_keyboard_listener(cfg.intervention_toggle_key)
 
         with VideoEncodingManager(dataset):
             recorded_episodes = 0
@@ -560,6 +690,7 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
                     display_data=cfg.display_data,
                     display_compressed_images=display_compressed_images,
                     policy_sync_executor=policy_sync_executor,
+                    intervention_state_machine_enabled=cfg.intervention_state_machine_enabled,
                 )
 
                 # Execute a few seconds without recording to give time to manually reset the environment
@@ -585,6 +716,7 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
                         single_task=cfg.dataset.single_task,
                         display_data=cfg.display_data,
                         policy_sync_executor=policy_sync_executor,
+                        intervention_state_machine_enabled=cfg.intervention_state_machine_enabled,
                     )
 
                 if events["rerecord_episode"]:
