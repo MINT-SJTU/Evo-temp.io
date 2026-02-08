@@ -14,10 +14,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from lerobot.scripts.lerobot_calibrate import CalibrateConfig, calibrate
-from lerobot.scripts.lerobot_record import DatasetRecordConfig, RecordConfig, record
+from lerobot.scripts.lerobot_record import (
+    DatasetRecordConfig,
+    PolicySyncDualArmExecutor,
+    RecordConfig,
+    record,
+)
 from lerobot.scripts.lerobot_replay import DatasetReplayConfig, ReplayConfig, replay
 from lerobot.scripts.lerobot_teleoperate import TeleoperateConfig, teleoperate
 from tests.fixtures.constants import DUMMY_REPO_ID
@@ -121,3 +126,18 @@ def test_record_and_replay(tmp_path):
         mock_get_safe_version.return_value = "v3.0"
         mock_snapshot_download.return_value = str(tmp_path / "record_and_replay")
         replay(replay_cfg)
+
+
+def test_policy_sync_dual_arm_executor():
+    robot = MagicMock()
+    robot.send_action.return_value = {"motor_1.pos": 10.0}
+    teleop = MagicMock()
+
+    executor = PolicySyncDualArmExecutor(robot=robot, teleop=teleop, parallel_dispatch=True)
+    action = {"motor_1.pos": 10.0}
+    sent_action = executor.send_action(action)
+    executor.shutdown()
+
+    assert sent_action == action
+    robot.send_action.assert_called_once_with(action)
+    teleop.send_feedback.assert_called_once_with(action)

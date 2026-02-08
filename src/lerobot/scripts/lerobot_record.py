@@ -64,6 +64,7 @@ lerobot-record \
 
 import logging
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from pprint import pformat
@@ -210,6 +211,10 @@ class RecordConfig:
     play_sounds: bool = True
     # Resume recording on an existing dataset.
     resume: bool = False
+    # In policy mode, broadcast the same robot action to the teleop arm via `teleop.send_feedback`.
+    policy_sync_to_teleop: bool = False
+    # Use parallel dispatch to reduce action broadcast latency when syncing policy to teleop.
+    policy_sync_parallel: bool = True
 
     def __post_init__(self):
         # HACK: We parse again the cli args here to get the pretrained path if there was one.
@@ -228,6 +233,32 @@ class RecordConfig:
     def __get_path_fields__(cls) -> list[str]:
         """This enables the parser to load config from the policy using `--policy.path=local/dir`"""
         return ["policy"]
+
+
+class PolicySyncDualArmExecutor:
+    """Broadcast one policy-derived robot action to follower + teleop arm."""
+
+    def __init__(self, robot: Robot, teleop: Teleoperator, parallel_dispatch: bool = True):
+        self.robot = robot
+        self.teleop = teleop
+        self.parallel_dispatch = parallel_dispatch
+        self._pool = ThreadPoolExecutor(max_workers=2) if parallel_dispatch else None
+
+    def send_action(self, action: RobotAction) -> RobotAction:
+        if self._pool is None:
+            sent_action = self.robot.send_action(action)
+            self.teleop.send_feedback(action)
+            return sent_action
+
+        robot_future = self._pool.submit(self.robot.send_action, action)
+        teleop_future = self._pool.submit(self.teleop.send_feedback, action)
+        sent_action = robot_future.result()
+        teleop_future.result()
+        return sent_action
+
+    def shutdown(self) -> None:
+        if self._pool is not None:
+            self._pool.shutdown(wait=True)
 
 
 """ --------------- record_loop() data flow --------------------------
@@ -283,6 +314,7 @@ def record_loop(
     single_task: str | None = None,
     display_data: bool = False,
     display_compressed_images: bool = False,
+    policy_sync_executor: PolicySyncDualArmExecutor | None = None,
 ):
     if dataset is not None and dataset.fps != fps:
         raise ValueError(f"The dataset fps should be equal to requested fps ({dataset.fps} != {fps}).")
@@ -384,7 +416,10 @@ def record_loop(
         # Action can eventually be clipped using `max_relative_target`,
         # so action actually sent is saved in the dataset. action = postprocessor.process(action)
         # TODO(steven, pepijn, adil): we should use a pipeline step to clip the action, so the sent action is the action that we input to the robot.
-        _sent_action = robot.send_action(robot_action_to_send)
+        if policy is not None and policy_sync_executor is not None:
+            _sent_action = policy_sync_executor.send_action(robot_action_to_send)
+        else:
+            _sent_action = robot.send_action(robot_action_to_send)
 
         # Write to dataset
         if dataset is not None:
@@ -437,6 +472,7 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
 
     dataset = None
     listener = None
+    policy_sync_executor = None
 
     try:
         if cfg.resume:
@@ -488,6 +524,19 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
         if teleop is not None:
             teleop.connect()
 
+        if cfg.policy_sync_to_teleop:
+            if cfg.policy is None:
+                raise ValueError("`policy_sync_to_teleop=true` requires `policy` to be set.")
+            if teleop is None or isinstance(teleop, list):
+                raise ValueError(
+                    "`policy_sync_to_teleop=true` requires exactly one teleoperator with send_feedback support."
+                )
+            policy_sync_executor = PolicySyncDualArmExecutor(
+                robot=robot,
+                teleop=teleop,
+                parallel_dispatch=cfg.policy_sync_parallel,
+            )
+
         listener, events = init_keyboard_listener()
 
         with VideoEncodingManager(dataset):
@@ -510,6 +559,7 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
                     single_task=cfg.dataset.single_task,
                     display_data=cfg.display_data,
                     display_compressed_images=display_compressed_images,
+                    policy_sync_executor=policy_sync_executor,
                 )
 
                 # Execute a few seconds without recording to give time to manually reset the environment
@@ -534,6 +584,7 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
                         control_time_s=cfg.dataset.reset_time_s,
                         single_task=cfg.dataset.single_task,
                         display_data=cfg.display_data,
+                        policy_sync_executor=policy_sync_executor,
                     )
 
                 if events["rerecord_episode"]:
@@ -550,6 +601,9 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
 
         if dataset:
             dataset.finalize()
+
+        if policy_sync_executor is not None:
+            policy_sync_executor.shutdown()
 
         if robot.is_connected:
             robot.disconnect()

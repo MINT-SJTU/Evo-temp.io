@@ -146,9 +146,16 @@ class SOLeader(Teleoperator):
         logger.debug(f"{self} read action: {dt_ms:.1f}ms")
         return action
 
+    @check_if_not_connected
     def send_feedback(self, feedback: dict[str, float]) -> None:
-        # TODO: Implement force feedback
-        raise NotImplementedError
+        # For phase-A dual-arm execution, reuse leader as a commanded arm by
+        # mapping `{joint}.pos` to motor goal positions.
+        goal_pos = {
+            key.removesuffix(".pos"): val for key, val in feedback.items() if key.endswith(".pos")
+        }
+        if not goal_pos:
+            return
+        self.bus.sync_write("Goal_Position", goal_pos)
 
     @check_if_not_connected
     def disconnect(self) -> None:
