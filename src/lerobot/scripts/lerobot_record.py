@@ -419,6 +419,11 @@ def record_loop(
                 else:
                     intervention_state = INTERVENTION_STATE_RELEASE
                     set_teleop_manual_control(False)
+                    if policy is not None and preprocessor is not None and postprocessor is not None:
+                        policy.reset()
+                        preprocessor.reset()
+                        postprocessor.reset()
+                        logging.info("Policy cache reset on release: next policy action is recomputed.")
                     logging.info("Intervention release requested (S2): returning control to policy.")
             else:
                 logging.info("Intervention toggle ignored because policy+teleop are not both active.")
