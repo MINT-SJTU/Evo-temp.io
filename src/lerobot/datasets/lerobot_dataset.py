@@ -1183,6 +1183,7 @@ class LeRobotDataset(torch.utils.data.Dataset):
         self,
         episode_data: dict | None = None,
         parallel_encoding: bool = True,
+        extra_episode_metadata: dict | None = None,
     ) -> None:
         """
         This will save to disk the current episode in self.episode_buffer.
@@ -1197,6 +1198,8 @@ class LeRobotDataset(torch.utils.data.Dataset):
                 None.
             parallel_encoding (bool, optional): If True, encode videos in parallel using ProcessPoolExecutor.
                 Defaults to True on Linux, False on macOS as it tends to use all the CPU available already.
+            extra_episode_metadata (dict | None, optional): Additional episode-level metadata (e.g.
+                `episode_success`) written under `meta/episodes`.
         """
         episode_buffer = episode_data if episode_data is not None else self.episode_buffer
 
@@ -1229,6 +1232,8 @@ class LeRobotDataset(torch.utils.data.Dataset):
         ep_stats = compute_episode_stats(episode_buffer, self.features)
 
         ep_metadata = self._save_episode_data(episode_buffer)
+        if extra_episode_metadata:
+            ep_metadata.update(extra_episode_metadata)
         has_video_keys = len(self.meta.video_keys) > 0
         use_batched_encoding = self.batch_encoding_size > 1
 

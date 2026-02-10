@@ -137,6 +137,12 @@ from lerobot.utils.control_utils import (
     sanity_check_dataset_robot_compatibility,
 )
 from lerobot.utils.import_utils import register_third_party_plugins
+from lerobot.utils.recording_annotations import (
+    infer_collector_policy_id,
+    normalize_episode_success_label,
+    resolve_collector_policy_id,
+    resolve_episode_success_label,
+)
 from lerobot.utils.robot_utils import precise_sleep
 from lerobot.utils.utils import (
     get_safe_torch_device,
@@ -221,6 +227,22 @@ class RecordConfig:
     intervention_state_machine_enabled: bool = True
     # Keyboard key used to toggle entering/leaving intervention.
     intervention_toggle_key: str = "i"
+    # Whether to capture episode-level success/failure labels from keyboard.
+    enable_episode_outcome_labeling: bool = False
+    # Keyboard key to mark the current episode as success and end it.
+    episode_success_key: str = "s"
+    # Keyboard key to mark the current episode as failure and end it.
+    episode_failure_key: str = "f"
+    # Optional fallback label used when no explicit success/failure key was pressed.
+    default_episode_success: str | None = None
+    # If True, require explicit or default episode labels before saving.
+    require_episode_success_label: bool = False
+    # Whether to store step-level collector policy provenance.
+    enable_collector_policy_id: bool = False
+    # Policy identifier used when action source is policy. If omitted, inferred from policy config.
+    collector_policy_id_policy: str | None = None
+    # Policy identifier used when action source is human/teleop.
+    collector_policy_id_human: str = "human"
 
     def __post_init__(self):
         # HACK: We parse again the cli args here to get the pretrained path if there was one.
@@ -236,6 +258,31 @@ class RecordConfig:
             raise ValueError("Choose a policy, a teleoperator or both to control the robot")
         if not self.intervention_toggle_key or len(self.intervention_toggle_key) != 1:
             raise ValueError("`intervention_toggle_key` must be a single character.")
+
+        if self.enable_episode_outcome_labeling:
+            label_key_bindings = {
+                "episode_success_key": self.episode_success_key,
+                "episode_failure_key": self.episode_failure_key,
+            }
+            for key_name, key_value in label_key_bindings.items():
+                if not key_value or len(key_value) != 1:
+                    raise ValueError(f"`{key_name}` must be a single character.")
+
+            normalized_keys = [
+                self.intervention_toggle_key.lower(),
+                self.episode_success_key.lower(),
+                self.episode_failure_key.lower(),
+            ]
+            if len(set(normalized_keys)) != len(normalized_keys):
+                raise ValueError(
+                    "`intervention_toggle_key`, `episode_success_key`, and `episode_failure_key` must be distinct."
+                )
+
+        if self.default_episode_success is not None:
+            self.default_episode_success = normalize_episode_success_label(self.default_episode_success)
+
+        if not self.collector_policy_id_human:
+            raise ValueError("`collector_policy_id_human` must be a non-empty string.")
 
     @classmethod
     def __get_path_fields__(cls) -> list[str]:
@@ -329,6 +376,8 @@ def record_loop(
     display_compressed_images: bool = False,
     policy_sync_executor: PolicySyncDualArmExecutor | None = None,
     intervention_state_machine_enabled: bool = True,
+    collector_policy_id_policy: str = "policy",
+    collector_policy_id_human: str = "human",
 ):
     if dataset is not None and dataset.fps != fps:
         raise ValueError(f"The dataset fps should be equal to requested fps ({dataset.fps} != {fps}).")
@@ -381,7 +430,7 @@ def record_loop(
         teleop_arm_for_mode_switch = teleop_arm
 
     def set_teleop_manual_control(enabled: bool) -> None:
-        if policy_sync_executor is None or teleop_arm_for_mode_switch is None:
+        if teleop_arm_for_mode_switch is None:
             return
         if not hasattr(teleop_arm_for_mode_switch, "set_manual_control"):
             return
@@ -389,6 +438,10 @@ def record_loop(
             teleop_arm_for_mode_switch.set_manual_control(enabled)
         except Exception:
             logging.exception("Failed to switch teleop manual-control mode to %s", enabled)
+
+    if policy is None:
+        # During reset/teleop-only loops keep leader backdrivable for manual dragging.
+        set_teleop_manual_control(True)
 
     # Reset policy and processor if they are provided
     if policy is not None and preprocessor is not None and postprocessor is not None:
@@ -536,6 +589,14 @@ def record_loop(
                 frame["complementary_info.is_intervention"] = np.array([is_intervention], dtype=np.float32)
             if "complementary_info.state" in dataset.features:
                 frame["complementary_info.state"] = np.array([intervention_state], dtype=np.float32)
+            if "complementary_info.collector_policy_id" in dataset.features:
+                frame["complementary_info.collector_policy_id"] = resolve_collector_policy_id(
+                    intervention_enabled=intervention_enabled,
+                    is_intervention=bool(is_intervention),
+                    selected_from_policy=selected_from_policy,
+                    policy_id=collector_policy_id_policy,
+                    human_id=collector_policy_id_human,
+                )
             dataset.add_frame(frame)
 
         if display_data:
@@ -555,6 +616,10 @@ def record_loop(
 @parser.wrap()
 def record(cfg: RecordConfig) -> LeRobotDataset:
     init_logging()
+    if cfg.require_episode_success_label and not cfg.enable_episode_outcome_labeling:
+        raise ValueError(
+            "`require_episode_success_label=true` requires `enable_episode_outcome_labeling=true`."
+        )
     logging.info(pformat(asdict(cfg)))
     if cfg.display_data:
         init_rerun(session_name="recording", ip=cfg.display_ip, port=cfg.display_port)
@@ -603,6 +668,12 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
             "dtype": "float32",
             "shape": (1,),
             "names": ["state"],
+        }
+    if cfg.enable_collector_policy_id:
+        dataset_features["complementary_info.collector_policy_id"] = {
+            "dtype": "string",
+            "shape": (1,),
+            "names": ["collector_policy_id"],
         }
 
     dataset = None
@@ -655,6 +726,13 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
                 },
             )
 
+        collector_policy_id_policy = (
+            cfg.collector_policy_id_policy
+            if cfg.collector_policy_id_policy is not None
+            else infer_collector_policy_id(cfg.policy)
+        )
+        collector_policy_id_human = cfg.collector_policy_id_human
+
         robot.connect()
         if teleop is not None:
             teleop.connect()
@@ -672,11 +750,16 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
                 parallel_dispatch=cfg.policy_sync_parallel,
             )
 
-        listener, events = init_keyboard_listener(cfg.intervention_toggle_key)
+        listener, events = init_keyboard_listener(
+            intervention_toggle_key=cfg.intervention_toggle_key,
+            episode_success_key=cfg.episode_success_key if cfg.enable_episode_outcome_labeling else None,
+            episode_failure_key=cfg.episode_failure_key if cfg.enable_episode_outcome_labeling else None,
+        )
 
         with VideoEncodingManager(dataset):
             recorded_episodes = 0
             while recorded_episodes < cfg.dataset.num_episodes and not events["stop_recording"]:
+                events["episode_outcome"] = None
                 log_say(f"Recording episode {dataset.num_episodes}", cfg.play_sounds)
                 record_loop(
                     robot=robot,
@@ -696,7 +779,23 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
                     display_compressed_images=display_compressed_images,
                     policy_sync_executor=policy_sync_executor,
                     intervention_state_machine_enabled=cfg.intervention_state_machine_enabled,
+                    collector_policy_id_policy=collector_policy_id_policy,
+                    collector_policy_id_human=collector_policy_id_human,
                 )
+
+                episode_success = None
+                if cfg.enable_episode_outcome_labeling:
+                    episode_success = resolve_episode_success_label(
+                        explicit_label=events.get("episode_outcome"),
+                        default_label=cfg.default_episode_success,
+                        require_label=cfg.require_episode_success_label,
+                    )
+                    if events.get("episode_outcome") is None and episode_success is not None:
+                        logging.warning(
+                            "Episode %s has no explicit success/failure label, defaulting to '%s'.",
+                            dataset.num_episodes,
+                            episode_success,
+                        )
 
                 # Execute a few seconds without recording to give time to manually reset the environment
                 # Skip reset for the last episode to be recorded
@@ -722,16 +821,24 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
                         display_data=cfg.display_data,
                         policy_sync_executor=policy_sync_executor,
                         intervention_state_machine_enabled=cfg.intervention_state_machine_enabled,
+                        collector_policy_id_policy=collector_policy_id_policy,
+                        collector_policy_id_human=collector_policy_id_human,
                     )
 
                 if events["rerecord_episode"]:
                     log_say("Re-record episode", cfg.play_sounds)
                     events["rerecord_episode"] = False
                     events["exit_early"] = False
+                    events["episode_outcome"] = None
                     dataset.clear_episode_buffer()
                     continue
 
-                dataset.save_episode()
+                extra_episode_metadata = (
+                    {"episode_success": episode_success}
+                    if cfg.enable_episode_outcome_labeling
+                    else None
+                )
+                dataset.save_episode(extra_episode_metadata=extra_episode_metadata)
                 recorded_episodes += 1
     finally:
         log_say("Stop recording", cfg.play_sounds, blocking=True)

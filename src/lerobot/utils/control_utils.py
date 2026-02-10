@@ -34,6 +34,7 @@ from lerobot.policies.pretrained import PreTrainedPolicy
 from lerobot.policies.utils import prepare_observation_for_inference
 from lerobot.processor import PolicyAction, PolicyProcessorPipeline
 from lerobot.robots import Robot
+from lerobot.utils.recording_annotations import EPISODE_FAILURE, EPISODE_SUCCESS
 
 
 @cache
@@ -115,12 +116,16 @@ def predict_action(
     return action
 
 
-def init_keyboard_listener(intervention_toggle_key: str = "i"):
+def init_keyboard_listener(
+    intervention_toggle_key: str = "i",
+    episode_success_key: str | None = None,
+    episode_failure_key: str | None = None,
+):
     """
     Initializes a non-blocking keyboard listener for real-time user interaction.
 
-    This function sets up a listener for specific keys (right arrow, left arrow, escape, and an
-    intervention toggle key) to control
+    This function sets up a listener for specific keys (right arrow, left arrow, escape, intervention
+    toggle key, and optional episode success/failure keys) to control
     the program flow during execution, such as stopping recording or exiting loops. It gracefully
     handles headless environments where keyboard listening is not possible.
 
@@ -137,6 +142,7 @@ def init_keyboard_listener(intervention_toggle_key: str = "i"):
     events["rerecord_episode"] = False
     events["stop_recording"] = False
     events["toggle_intervention"] = False
+    events["episode_outcome"] = None
 
     if is_headless():
         logging.warning(
@@ -164,6 +170,24 @@ def init_keyboard_listener(intervention_toggle_key: str = "i"):
             elif hasattr(key, "char") and key.char and key.char.lower() == intervention_toggle_key.lower():
                 print(f"'{intervention_toggle_key}' key pressed. Toggling intervention mode...")
                 events["toggle_intervention"] = True
+            elif (
+                episode_success_key
+                and hasattr(key, "char")
+                and key.char
+                and key.char.lower() == episode_success_key.lower()
+            ):
+                print(f"'{episode_success_key}' key pressed. Marking episode as success and exiting loop...")
+                events["episode_outcome"] = EPISODE_SUCCESS
+                events["exit_early"] = True
+            elif (
+                episode_failure_key
+                and hasattr(key, "char")
+                and key.char
+                and key.char.lower() == episode_failure_key.lower()
+            ):
+                print(f"'{episode_failure_key}' key pressed. Marking episode as failure and exiting loop...")
+                events["episode_outcome"] = EPISODE_FAILURE
+                events["exit_early"] = True
         except Exception as e:
             print(f"Error handling key press: {e}")
 
@@ -194,7 +218,7 @@ def sanity_check_dataset_name(repo_id, policy_cfg):
     # Check if dataset_name starts with "eval_" but policy is missing
     if dataset_name.startswith("eval_") and policy_cfg is None:
         raise ValueError(
-            f"Your dataset name begins with 'eval_' ({dataset_name}), but no policy is provided ({policy_cfg.type})."
+            f"Your dataset name begins with 'eval_' ({dataset_name}), but no policy is provided."
         )
 
     # Check if dataset_name does not start with "eval_" but policy is provided

@@ -16,18 +16,21 @@
 
 from unittest.mock import MagicMock, patch
 
+from lerobot.datasets.lerobot_dataset import LeRobotDataset
 from lerobot.scripts.lerobot_calibrate import CalibrateConfig, calibrate
+from lerobot.scripts.lerobot_human_inloop_record import human_inloop_record
 from lerobot.scripts.lerobot_record import (
     DatasetRecordConfig,
     PolicySyncDualArmExecutor,
     RecordConfig,
+    record_loop,
     record,
 )
 from lerobot.scripts.lerobot_replay import DatasetReplayConfig, ReplayConfig, replay
 from lerobot.scripts.lerobot_teleoperate import TeleoperateConfig, teleoperate
 from tests.fixtures.constants import DUMMY_REPO_ID
-from tests.mocks.mock_robot import MockRobotConfig
-from tests.mocks.mock_teleop import MockTeleopConfig
+from tests.mocks.mock_robot import MockRobot, MockRobotConfig
+from tests.mocks.mock_teleop import MockTeleop, MockTeleopConfig
 
 
 def test_calibrate():
@@ -86,6 +89,109 @@ def test_record_and_resume(tmp_path):
     assert dataset.meta.total_episodes == dataset.num_episodes == 2
     assert dataset.meta.total_frames == dataset.num_frames == 6
     assert dataset.meta.total_tasks == 1
+
+
+def test_record_adds_episode_success_and_collector_policy_id(tmp_path):
+    robot_cfg = MockRobotConfig()
+    teleop_cfg = MockTeleopConfig()
+    root = tmp_path / "record_with_annotations"
+    dataset_cfg = DatasetRecordConfig(
+        repo_id=DUMMY_REPO_ID,
+        single_task="Dummy task",
+        root=root,
+        num_episodes=1,
+        episode_time_s=0.1,
+        reset_time_s=0,
+        push_to_hub=False,
+    )
+    cfg = RecordConfig(
+        robot=robot_cfg,
+        dataset=dataset_cfg,
+        teleop=teleop_cfg,
+        play_sounds=False,
+        enable_episode_outcome_labeling=True,
+        default_episode_success="failure",
+        enable_collector_policy_id=True,
+    )
+
+    dataset = record(cfg)
+    assert "complementary_info.collector_policy_id" in dataset.features
+
+    reloaded = LeRobotDataset(DUMMY_REPO_ID, root=root)
+    assert reloaded[0]["complementary_info.collector_policy_id"] == "human"
+    assert "episode_success" in reloaded.meta.episodes.column_names
+    assert reloaded.meta.episodes[0]["episode_success"] == "failure"
+
+
+def test_human_inloop_record_works_without_policy_and_saves_annotations(tmp_path):
+    robot_cfg = MockRobotConfig()
+    teleop_cfg = MockTeleopConfig()
+    root = tmp_path / "hil_no_policy"
+    dataset_cfg = DatasetRecordConfig(
+        repo_id=DUMMY_REPO_ID,
+        single_task="Dummy task",
+        root=root,
+        num_episodes=1,
+        episode_time_s=0.1,
+        reset_time_s=0,
+        push_to_hub=False,
+    )
+    cfg = RecordConfig(
+        robot=robot_cfg,
+        dataset=dataset_cfg,
+        teleop=teleop_cfg,
+        play_sounds=False,
+    )
+
+    dataset = human_inloop_record(cfg)
+    assert cfg.intervention_state_machine_enabled is False
+    assert cfg.collector_policy_id_policy == "human"
+    assert "complementary_info.collector_policy_id" in dataset.features
+
+    reloaded = LeRobotDataset(DUMMY_REPO_ID, root=root)
+    assert reloaded[0]["complementary_info.collector_policy_id"] == "human"
+    assert "episode_success" in reloaded.meta.episodes.column_names
+    assert reloaded.meta.episodes[0]["episode_success"] == "failure"
+
+
+def test_record_loop_sets_leader_manual_control_during_reset():
+    class MockTeleopWithManualControl(MockTeleop):
+        def __init__(self, config):
+            super().__init__(config)
+            self.manual_control_calls = []
+
+        def set_manual_control(self, enabled: bool) -> None:
+            self.manual_control_calls.append(enabled)
+
+    robot = MockRobot(MockRobotConfig())
+    teleop = MockTeleopWithManualControl(MockTeleopConfig())
+    robot.connect()
+    teleop.connect()
+    try:
+        record_loop(
+            robot=robot,
+            events={
+                "exit_early": True,
+                "rerecord_episode": False,
+                "stop_recording": False,
+                "toggle_intervention": False,
+                "episode_outcome": None,
+            },
+            fps=30,
+            teleop_action_processor=lambda x: x[0],
+            robot_action_processor=lambda x: x[0],
+            robot_observation_processor=lambda x: x,
+            teleop=teleop,
+            policy=None,
+            control_time_s=0.1,
+        )
+    finally:
+        if teleop.is_connected:
+            teleop.disconnect()
+        if robot.is_connected:
+            robot.disconnect()
+
+    assert teleop.manual_control_calls == [True]
 
 
 def test_record_and_replay(tmp_path):
