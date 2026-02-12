@@ -211,7 +211,8 @@ lerobot-imgtransform-viz="lerobot.scripts.lerobot_imgtransform_viz:main"
 lerobot-edit-dataset="lerobot.scripts.lerobot_edit_dataset:main"
 lerobot-setup-can="lerobot.scripts.lerobot_setup_can:main"
 lerobot-human-inloop-record="lerobot.scripts.lerobot_human_inloop_record:main"
-lerobot-value-train="lerobot.scripts.lerobot_value_train:main"
+lerobot-value-train="lerobot.scripts.lerobot_value_train_only:main"
+lerobot-value-infer="lerobot.scripts.lerobot_value_infer_only:main"
 
 # ---------------- Tool Configurations ----------------
 [tool.setuptools.packages.find]

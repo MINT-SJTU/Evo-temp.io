@@ -25,7 +25,7 @@ from lerobot.configs.default import DatasetConfig, WandBConfig
 from lerobot.optim.optimizers import OptimizerConfig
 from lerobot.optim.schedulers import LRSchedulerConfig
 from lerobot.utils.recording_annotations import normalize_episode_success_label
-from lerobot.value.configuration import MLPValueConfig, ValueModelConfig
+from lerobot.value.configuration import SiglipGemmaValueConfig, ValueModelConfig
 
 
 @dataclass
@@ -97,7 +97,7 @@ class ValueTrainConfig:
 @dataclass
 class ValueTrainPipelineConfig:
     dataset: ValueDatasetConfig
-    value: ValueModelConfig = field(default_factory=MLPValueConfig)
+    value: ValueModelConfig = field(default_factory=SiglipGemmaValueConfig)
     targets: ValueTargetsConfig = field(default_factory=ValueTargetsConfig)
     acp: ValueAdvantageConfig = field(default_factory=ValueAdvantageConfig)
     train: ValueTrainConfig = field(default_factory=ValueTrainConfig)

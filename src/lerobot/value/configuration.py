@@ -45,7 +45,7 @@ class ValueModelConfig(draccus.ChoiceRegistry, abc.ABC):  # type: ignore[misc]
 
     @classmethod
     def default_choice_name(cls) -> str | None:
-        return "mlp"
+        return "siglip_gemma_value"
 
     def validate(self) -> None:
         if self.num_bins < 2:
@@ -66,25 +66,55 @@ class ValueModelConfig(draccus.ChoiceRegistry, abc.ABC):  # type: ignore[misc]
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> "ValueModelConfig":
         data = dict(payload)
-        model_type = str(data.pop("type", cls.default_choice_name() or "mlp"))
+        model_type = str(data.pop("type", cls.default_choice_name() or "siglip_gemma_value"))
         config_cls = cls.get_choice_class(model_type)
         return config_cls(**data)
 
 
-@ValueModelConfig.register_subclass("mlp")
+@ValueModelConfig.register_subclass("siglip_gemma_value")
 @dataclass
-class MLPValueConfig(ValueModelConfig):
-    hidden_dims: list[int] = field(default_factory=lambda: [512, 512])
-    task_embedding_dim: int = 32
+class SiglipGemmaValueConfig(ValueModelConfig):
+    vision_repo_id: str = "google/siglip-so400m-patch14-384"
+    language_repo_id: str = "google/gemma-3-270m"
+    vision_revision: str | None = None
+    language_revision: str | None = None
+
+    task_field: str = "task"
+    camera_features: list[str] = field(default_factory=list)
+
+    tokenizer_max_length: int = 200
+
+    state_proj_dim: int = 512
+    fusion_hidden_dim: int = 512
+    fusion_num_layers: int = 2
+    fusion_num_heads: int = 8
     dropout: float = 0.1
+    dtype: str = "float32"
+    freeze_vision_encoder: bool = False
+    freeze_language_model: bool = False
+    use_gradient_checkpointing: bool = True
 
     def validate(self) -> None:
         super().validate()
-        if len(self.hidden_dims) == 0:
-            raise ValueError("'value.hidden_dims' cannot be empty.")
-        if any(dim <= 0 for dim in self.hidden_dims):
-            raise ValueError("'value.hidden_dims' must contain positive integers.")
-        if self.task_embedding_dim <= 0:
-            raise ValueError("'value.task_embedding_dim' must be > 0.")
+        if not self.vision_repo_id:
+            raise ValueError("'value.vision_repo_id' must be non-empty.")
+        if not self.language_repo_id:
+            raise ValueError("'value.language_repo_id' must be non-empty.")
+        if not self.task_field:
+            raise ValueError("'value.task_field' must be non-empty.")
+        if self.tokenizer_max_length <= 0:
+            raise ValueError("'value.tokenizer_max_length' must be > 0.")
+        if self.state_proj_dim <= 0:
+            raise ValueError("'value.state_proj_dim' must be > 0.")
+        if self.fusion_hidden_dim <= 0:
+            raise ValueError("'value.fusion_hidden_dim' must be > 0.")
+        if self.fusion_num_layers <= 0:
+            raise ValueError("'value.fusion_num_layers' must be > 0.")
+        if self.fusion_num_heads <= 0:
+            raise ValueError("'value.fusion_num_heads' must be > 0.")
+        if self.fusion_hidden_dim % self.fusion_num_heads != 0:
+            raise ValueError("'value.fusion_hidden_dim' must be divisible by 'value.fusion_num_heads'.")
+        if self.dtype not in {"float32", "bfloat16"}:
+            raise ValueError("'value.dtype' must be one of {'float32', 'bfloat16'}.")
         if not 0.0 <= self.dropout < 1.0:
             raise ValueError("'value.dropout' must be within [0, 1).")

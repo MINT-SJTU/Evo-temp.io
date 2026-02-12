@@ -14,54 +14,192 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from __future__ import annotations
+
+import logging
+from contextlib import nullcontext
+from typing import TYPE_CHECKING
+
 import torch
-from torch import nn
+from torch import Tensor, nn
 
-from lerobot.value.configuration import MLPValueConfig, ValueModelConfig
+from lerobot.utils.import_utils import _transformers_available
+from lerobot.value.configuration import SiglipGemmaValueConfig, ValueModelConfig
+
+if TYPE_CHECKING or _transformers_available:
+    from transformers import AutoModel
+else:
+    AutoModel = None
 
 
-class MLPValueModel(nn.Module):
-    def __init__(self, cfg: MLPValueConfig, state_dim: int, num_tasks: int):
+def _resolve_load_dtype(dtype_name: str) -> torch.dtype:
+    requested_dtype = torch.bfloat16 if dtype_name == "bfloat16" else torch.float32
+    if requested_dtype == torch.bfloat16 and not torch.cuda.is_available():
+        logging.warning("value.dtype=bfloat16 requested but CUDA unavailable. Falling back to float32.")
+        return torch.float32
+    return requested_dtype
+
+
+def _freeze_module(module: nn.Module) -> None:
+    module.eval()
+    for parameter in module.parameters():
+        parameter.requires_grad = False
+
+
+def _maybe_enable_gradient_checkpointing(module: nn.Module) -> None:
+    if hasattr(module, "gradient_checkpointing_enable"):
+        module.gradient_checkpointing_enable()
+    elif hasattr(module, "gradient_checkpointing"):
+        module.gradient_checkpointing = True
+
+
+def _extract_hidden_size(model: nn.Module) -> int:
+    config = getattr(model, "config", None)
+    if config is None:
+        raise ValueError(f"Cannot infer hidden size for model type {type(model)}: missing `.config`.")
+
+    if hasattr(config, "hidden_size"):
+        return int(config.hidden_size)
+    if hasattr(config, "text_config") and hasattr(config.text_config, "hidden_size"):
+        return int(config.text_config.hidden_size)
+    raise ValueError(f"Cannot infer hidden size for model config type {type(config)}.")
+
+
+class SiglipGemmaValueModel(nn.Module):
+    def __init__(self, cfg: SiglipGemmaValueConfig, state_dim: int, num_tasks: int):  # noqa: ARG002
         super().__init__()
-        if state_dim <= 0:
-            raise ValueError(f"Expected positive state_dim, got {state_dim}.")
-        if num_tasks <= 0:
-            raise ValueError(f"Expected positive num_tasks, got {num_tasks}.")
+        if AutoModel is None:
+            raise ImportError("transformers is not installed. Install with `pip install 'lerobot[pi0]'`.")
 
         self.cfg = cfg
         self.state_dim = state_dim
-        self.num_tasks = num_tasks
+        self.model_dtype = _resolve_load_dtype(cfg.dtype)
 
-        self.task_embedding = nn.Embedding(num_tasks, cfg.task_embedding_dim)
+        self.vision_encoder = AutoModel.from_pretrained(
+            cfg.vision_repo_id,
+            revision=cfg.vision_revision,
+            torch_dtype=self.model_dtype,
+        )
+        self.language_model = AutoModel.from_pretrained(
+            cfg.language_repo_id,
+            revision=cfg.language_revision,
+            torch_dtype=self.model_dtype,
+        )
+        language_hidden_size = _extract_hidden_size(self.language_model)
 
-        layers: list[nn.Module] = []
-        in_dim = state_dim + cfg.task_embedding_dim
-        for hidden_dim in cfg.hidden_dims:
-            layers.append(nn.Linear(in_dim, hidden_dim))
-            layers.append(nn.ReLU(inplace=True))
-            if cfg.dropout > 0.0:
-                layers.append(nn.Dropout(cfg.dropout))
-            in_dim = hidden_dim
-        self.backbone = nn.Sequential(*layers)
-        self.output_head = nn.Linear(in_dim, cfg.num_bins)
+        self.image_projector = nn.Sequential(
+            nn.LazyLinear(cfg.fusion_hidden_dim),
+            nn.GELU(),
+            nn.Dropout(cfg.dropout),
+        )
+        self.language_projector = nn.Sequential(
+            nn.Linear(language_hidden_size, cfg.fusion_hidden_dim),
+            nn.GELU(),
+            nn.Dropout(cfg.dropout),
+        )
+        self.final_norm = nn.LayerNorm(cfg.fusion_hidden_dim * 2)
+        self.value_head = nn.Sequential(
+            nn.Linear(cfg.fusion_hidden_dim * 2, cfg.fusion_hidden_dim),
+            nn.GELU(),
+            nn.Dropout(cfg.dropout),
+            nn.Linear(cfg.fusion_hidden_dim, cfg.num_bins),
+        )
 
-    def forward(self, state: torch.Tensor, task_index: torch.Tensor) -> torch.Tensor:
-        if state.ndim != 2:
-            raise ValueError(f"'state' must have shape [B, D], got {tuple(state.shape)}")
-        if task_index.ndim != 1:
-            raise ValueError(f"'task_index' must have shape [B], got {tuple(task_index.shape)}")
-        if state.shape[0] != task_index.shape[0]:
+        if cfg.use_gradient_checkpointing:
+            _maybe_enable_gradient_checkpointing(self.language_model)
+            _maybe_enable_gradient_checkpointing(self.vision_encoder)
+
+        if cfg.freeze_language_model:
+            _freeze_module(self.language_model)
+        if cfg.freeze_vision_encoder:
+            _freeze_module(self.vision_encoder)
+
+    def _encode_images(self, flat_images: Tensor) -> Tensor:
+        if hasattr(self.vision_encoder, "get_image_features"):
+            return self.vision_encoder.get_image_features(pixel_values=flat_images)
+
+        vision_outputs = self.vision_encoder(pixel_values=flat_images, return_dict=True)
+        if hasattr(vision_outputs, "pooler_output") and vision_outputs.pooler_output is not None:
+            return vision_outputs.pooler_output
+        if hasattr(vision_outputs, "last_hidden_state"):
+            return vision_outputs.last_hidden_state.mean(dim=1)
+        raise ValueError("Unsupported vision encoder output. Expected pooler_output or last_hidden_state.")
+
+    def _encode_language(self, input_ids: Tensor, attention_mask: Tensor) -> Tensor:
+        outputs = self.language_model(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            return_dict=True,
+        )
+        hidden = getattr(outputs, "last_hidden_state", None)
+        if hidden is None:
+            raise ValueError("Language model output does not contain `last_hidden_state`.")
+
+        token_mask = attention_mask.to(dtype=hidden.dtype).unsqueeze(-1)
+        denom = token_mask.sum(dim=1).clamp_min(1.0)
+        return (hidden * token_mask).sum(dim=1) / denom
+
+    def forward(
+        self,
+        input_ids: Tensor,
+        attention_mask: Tensor,
+        images: Tensor,
+        image_attention_mask: Tensor,
+    ) -> Tensor:
+        if input_ids.ndim != 2:
+            raise ValueError(f"'input_ids' must have shape [B, T], got {tuple(input_ids.shape)}.")
+        if attention_mask.ndim != 2:
+            raise ValueError(f"'attention_mask' must have shape [B, T], got {tuple(attention_mask.shape)}.")
+        if images.ndim != 5:
+            raise ValueError(f"'images' must have shape [B, N, C, H, W], got {tuple(images.shape)}.")
+        if image_attention_mask.ndim != 2:
             raise ValueError(
-                f"Batch mismatch between state ({state.shape[0]}) and task_index ({task_index.shape[0]})."
+                f"'image_attention_mask' must have shape [B, N], got {tuple(image_attention_mask.shape)}."
             )
 
-        task_embed = self.task_embedding(task_index.long())
-        x = torch.cat([state, task_embed], dim=-1)
-        x = self.backbone(x)
-        return self.output_head(x)
+        bsize = input_ids.shape[0]
+        if attention_mask.shape[0] != bsize:
+            raise ValueError("Batch size mismatch between input_ids and attention_mask.")
+        if images.shape[0] != bsize or image_attention_mask.shape[0] != bsize:
+            raise ValueError("Batch size mismatch between language and image inputs.")
+        if images.shape[1] == 0:
+            raise ValueError("At least one camera is required for SiglipGemmaValueModel.")
+
+        image_attention_mask = image_attention_mask.to(dtype=torch.bool, device=images.device)
+        if not torch.all(image_attention_mask.any(dim=1)):
+            raise ValueError("Each sample must have at least one valid camera input.")
+        language_mask = attention_mask.to(dtype=torch.bool, device=input_ids.device)
+        if not torch.all(language_mask.any(dim=1)):
+            raise ValueError("Each sample must have at least one valid language token.")
+
+        num_cameras = images.shape[1]
+        flat_images = images.reshape(bsize * num_cameras, *images.shape[2:])
+
+        image_context = torch.no_grad() if self.cfg.freeze_vision_encoder else nullcontext()
+        with image_context:
+            image_features = self._encode_images(flat_images)
+
+        language_context = torch.no_grad() if self.cfg.freeze_language_model else nullcontext()
+        with language_context:
+            language_features = self._encode_language(input_ids=input_ids, attention_mask=language_mask.long())
+
+        feature_dtype = torch.float32
+        image_features = image_features.to(dtype=feature_dtype)
+        language_features = language_features.to(dtype=feature_dtype)
+
+        image_tokens = self.image_projector(image_features).view(bsize, num_cameras, -1)
+        camera_token_mask = image_attention_mask.unsqueeze(-1).to(dtype=image_tokens.dtype)
+        image_tokens = image_tokens * camera_token_mask
+
+        camera_denominator = image_attention_mask.sum(dim=1, keepdim=True).to(dtype=image_tokens.dtype).clamp_min(1.0)
+        image_pooled = image_tokens.sum(dim=1) / camera_denominator
+        language_token = self.language_projector(language_features)
+
+        joint_features = torch.cat([image_pooled, language_token], dim=-1)
+        return self.value_head(self.final_norm(joint_features))
 
 
 def make_value_model(cfg: ValueModelConfig, state_dim: int, num_tasks: int) -> nn.Module:
-    if isinstance(cfg, MLPValueConfig):
-        return MLPValueModel(cfg=cfg, state_dim=state_dim, num_tasks=num_tasks)
+    if isinstance(cfg, SiglipGemmaValueConfig):
+        return SiglipGemmaValueModel(cfg=cfg, state_dim=state_dim, num_tasks=num_tasks)
     raise ValueError(f"Unsupported value model type '{cfg.type}'.")
