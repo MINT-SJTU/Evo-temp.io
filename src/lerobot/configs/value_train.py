@@ -30,7 +30,7 @@ from lerobot.value.configuration import SiglipGemmaValueConfig, ValueModelConfig
 
 @dataclass
 class ValueDatasetConfig(DatasetConfig):
-    download_videos: bool = False
+    download_videos: bool = True
     success_field: str = "episode_success"
     default_success: str = "failure"
 

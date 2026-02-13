@@ -27,9 +27,11 @@ from lerobot.utils.import_utils import _transformers_available
 from lerobot.value.configuration import SiglipGemmaValueConfig, ValueModelConfig
 
 if TYPE_CHECKING or _transformers_available:
-    from transformers import AutoModel
+    from transformers import AutoConfig, AutoModel, AutoModelForCausalLM
 else:
+    AutoConfig = None
     AutoModel = None
+    AutoModelForCausalLM = None
 
 
 def _resolve_load_dtype(dtype_name: str) -> torch.dtype:
@@ -48,7 +50,7 @@ def _freeze_module(module: nn.Module) -> None:
 
 def _maybe_enable_gradient_checkpointing(module: nn.Module) -> None:
     if hasattr(module, "gradient_checkpointing_enable"):
-        module.gradient_checkpointing_enable()
+        module.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
     elif hasattr(module, "gradient_checkpointing"):
         module.gradient_checkpointing = True
 
@@ -63,6 +65,79 @@ def _extract_hidden_size(model: nn.Module) -> int:
     if hasattr(config, "text_config") and hasattr(config.text_config, "hidden_size"):
         return int(config.text_config.hidden_size)
     raise ValueError(f"Cannot infer hidden size for model config type {type(config)}.")
+
+
+def _extract_vision_feature_size(model: nn.Module) -> int:
+    config = getattr(model, "config", None)
+    if config is None:
+        raise ValueError(f"Cannot infer vision feature size for model type {type(model)}: missing `.config`.")
+
+    if hasattr(config, "projection_dim"):
+        return int(config.projection_dim)
+    if hasattr(config, "vision_config") and hasattr(config.vision_config, "projection_dim"):
+        return int(config.vision_config.projection_dim)
+    if hasattr(config, "hidden_size"):
+        return int(config.hidden_size)
+    if hasattr(config, "vision_config") and hasattr(config.vision_config, "hidden_size"):
+        return int(config.vision_config.hidden_size)
+    raise ValueError(f"Cannot infer vision feature size for model config type {type(config)}.")
+
+
+def _validate_loading_info(repo_id: str, model_label: str, loading_info: dict[str, list] | None) -> None:
+    if loading_info is None:
+        return
+    missing = loading_info.get("missing_keys", [])
+    unexpected = loading_info.get("unexpected_keys", [])
+    mismatched = loading_info.get("mismatched_keys", [])
+    if not missing and not unexpected and not mismatched:
+        return
+    raise RuntimeError(
+        f"Pretrained weights for {model_label} from '{repo_id}' did not load cleanly: "
+        f"missing={len(missing)} unexpected={len(unexpected)} mismatched={len(mismatched)}. "
+        "This usually indicates a model class/checkpoint mismatch."
+    )
+
+
+def _load_language_model(
+    repo_id: str,
+    revision: str | None,
+    dtype: torch.dtype,
+) -> nn.Module:
+    if AutoConfig is None or AutoModelForCausalLM is None or AutoModel is None:
+        raise ImportError("transformers is not installed. Install with `pip install 'lerobot[pi0]'`.")
+
+    model_config = AutoConfig.from_pretrained(repo_id, revision=revision)
+    architectures = getattr(model_config, "architectures", None) or []
+    prefer_causal_lm = any(
+        isinstance(arch, str) and arch.endswith("ForCausalLM") for arch in architectures
+    )
+
+    if prefer_causal_lm:
+        lm_with_head, loading_info = AutoModelForCausalLM.from_pretrained(
+            repo_id,
+            revision=revision,
+            torch_dtype=dtype,
+            output_loading_info=True,
+        )
+        _validate_loading_info(repo_id, "language_model(causal_lm)", loading_info)
+        if not hasattr(lm_with_head, "model"):
+            raise RuntimeError(
+                f"AutoModelForCausalLM loaded from '{repo_id}' does not expose `.model` text backbone."
+            )
+        return lm_with_head.model
+
+    language_model, loading_info = AutoModel.from_pretrained(
+        repo_id,
+        revision=revision,
+        torch_dtype=dtype,
+        output_loading_info=True,
+    )
+    _validate_loading_info(repo_id, "language_model(auto_model)", loading_info)
+    if not isinstance(language_model, nn.Module):
+        raise TypeError(
+            f"AutoModel loaded from '{repo_id}' returned unexpected type: {type(language_model)}."
+        )
+    return language_model
 
 
 class SiglipGemmaValueModel(nn.Module):
@@ -80,15 +155,16 @@ class SiglipGemmaValueModel(nn.Module):
             revision=cfg.vision_revision,
             torch_dtype=self.model_dtype,
         )
-        self.language_model = AutoModel.from_pretrained(
-            cfg.language_repo_id,
+        self.language_model = _load_language_model(
+            repo_id=cfg.language_repo_id,
             revision=cfg.language_revision,
-            torch_dtype=self.model_dtype,
+            dtype=self.model_dtype,
         )
+        vision_feature_size = _extract_vision_feature_size(self.vision_encoder)
         language_hidden_size = _extract_hidden_size(self.language_model)
 
         self.image_projector = nn.Sequential(
-            nn.LazyLinear(cfg.fusion_hidden_dim),
+            nn.Linear(vision_feature_size, cfg.fusion_hidden_dim),
             nn.GELU(),
             nn.Dropout(cfg.dropout),
         )
