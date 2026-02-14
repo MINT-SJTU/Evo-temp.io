@@ -315,6 +315,20 @@ def _init_value_runtime(
     return value_output_dir, device
 
 
+def _push_dataset_to_hub_if_enabled(cfg: ValueInferencePipelineConfig, dataset: LeRobotDataset) -> bool:
+    if not cfg.push_to_hub:
+        return False
+    logging.info(
+        "Start pushing inferred dataset to hub | repo_id=%s root=%s push_videos=%s",
+        dataset.repo_id,
+        dataset.root,
+        False,
+    )
+    dataset.push_to_hub(push_videos=False)
+    logging.info("Finished pushing inferred dataset to hub | repo_id=%s", dataset.repo_id)
+    return True
+
+
 def run_value_inference_only_pipeline(
     cfg: ValueInferencePipelineConfig,
     accelerator: Accelerator | None = None,
@@ -489,6 +503,7 @@ def run_value_inference_only_pipeline(
     )
     diagnostics_path = save_diagnostics(value_output_dir / "diagnostics", diagnostics)
     logging.info("Diagnostics saved | %s", diagnostics_path)
+    dataset_pushed_to_hub = _push_dataset_to_hub_if_enabled(cfg, dataset)
 
     return {
         "num_frames": int(shared["frame_count"]),
@@ -497,6 +512,7 @@ def run_value_inference_only_pipeline(
         "checkpoint_root": str(checkpoint_root),
         "checkpoint_ref": checkpoint_ref,
         "diagnostics_path": str(diagnostics_path),
+        "dataset_pushed_to_hub": dataset_pushed_to_hub,
         "world_size": int(accelerator.num_processes),
         "main_process": True,
     }
