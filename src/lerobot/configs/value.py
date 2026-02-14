@@ -95,6 +95,33 @@ class ValueTrainConfig:
 
 
 @dataclass
+class ValueInferenceConfig:
+    repo_id: str | None = None
+    revision: str | None = None
+    checkpoint_root: Path | None = None
+    checkpoint_ref: str = "last"
+
+    def validate(self) -> None:
+        if self.repo_id and self.checkpoint_root is not None:
+            raise ValueError("'inference.repo_id' and 'inference.checkpoint_root' cannot be set together.")
+        if not self.checkpoint_ref:
+            raise ValueError("'inference.checkpoint_ref' must be non-empty.")
+
+
+@dataclass
+class ValueInferenceRuntimeConfig:
+    device: str | None = None
+    batch_size: int = 64
+    num_workers: int = 0
+
+    def validate(self) -> None:
+        if self.batch_size <= 0:
+            raise ValueError("'runtime.batch_size' must be > 0.")
+        if self.num_workers < 0:
+            raise ValueError("'runtime.num_workers' must be >= 0.")
+
+
+@dataclass
 class ValueTrainPipelineConfig:
     dataset: ValueDatasetConfig
     value: ValueModelConfig = field(default_factory=SiglipGemmaValueConfig)
@@ -142,6 +169,45 @@ class ValueTrainPipelineConfig:
             now = dt.datetime.now()
             train_dir = f"{now:%Y-%m-%d}/{now:%H-%M-%S}_{self.job_name}"
             self.output_dir = Path("outputs/train") / train_dir
+
+    def to_dict(self) -> dict[str, Any]:
+        return draccus.encode(self)  # type: ignore[no-any-return]
+
+
+@dataclass
+class ValueInferencePipelineConfig:
+    dataset: ValueDatasetConfig
+    inference: ValueInferenceConfig = field(default_factory=ValueInferenceConfig)
+    targets: ValueTargetsConfig = field(default_factory=ValueTargetsConfig)
+    acp: ValueAdvantageConfig = field(default_factory=ValueAdvantageConfig)
+    runtime: ValueInferenceRuntimeConfig = field(default_factory=ValueInferenceRuntimeConfig)
+    output_dir: Path | None = None
+    job_name: str | None = None
+    seed: int | None = 42
+
+    def validate(self) -> None:
+        self.inference.validate()
+        self.targets.validate()
+        self.acp.validate()
+        self.runtime.validate()
+
+        if not self.dataset.repo_id:
+            raise ValueError("'dataset.repo_id' must be provided.")
+        normalized_default = normalize_episode_success_label(self.dataset.default_success)
+        if normalized_default is None:
+            raise ValueError("'dataset.default_success' must be either 'success' or 'failure'.")
+        self.dataset.default_success = normalized_default
+        if not self.dataset.success_field:
+            raise ValueError("'dataset.success_field' must be non-empty.")
+
+        if not self.job_name:
+            dataset_id = self.dataset.repo_id.replace("/", "_")
+            self.job_name = f"{dataset_id}_value_infer"
+
+        if self.output_dir is None:
+            now = dt.datetime.now()
+            infer_dir = f"{now:%Y-%m-%d}/{now:%H-%M-%S}_{self.job_name}"
+            self.output_dir = Path("outputs/value_infer") / infer_dir
 
     def to_dict(self) -> dict[str, Any]:
         return draccus.encode(self)  # type: ignore[no-any-return]

@@ -23,11 +23,12 @@ import numpy as np
 import torch
 from accelerate import Accelerator
 from accelerate.utils import DistributedDataParallelKwargs
+from huggingface_hub import snapshot_download
 from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
 
 from lerobot.configs import parser
-from lerobot.configs.value_train import ValueTrainPipelineConfig
+from lerobot.configs.value import ValueInferencePipelineConfig
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
 from lerobot.utils.constants import OBS_IMAGES
 from lerobot.utils.import_utils import register_third_party_plugins
@@ -63,11 +64,11 @@ from lerobot.value.telemetry import (
 )
 
 
-def _create_accelerator(cfg: ValueTrainPipelineConfig, accelerator: Accelerator | None) -> Accelerator:
+def _create_accelerator(cfg: ValueInferencePipelineConfig, accelerator: Accelerator | None) -> Accelerator:
     if accelerator is not None:
         return accelerator
     ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=True)
-    force_cpu = cfg.train.device == "cpu"
+    force_cpu = cfg.runtime.device == "cpu"
     return Accelerator(step_scheduler_with_optimizer=False, kwargs_handlers=[ddp_kwargs], cpu=force_cpu)
 
 
@@ -110,7 +111,7 @@ def _build_episode_info(
     return episode_info, task_max_length
 
 
-def _load_dataset_distributed(cfg: ValueTrainPipelineConfig, accelerator: Accelerator) -> LeRobotDataset:
+def _load_dataset_distributed(cfg: ValueInferencePipelineConfig, accelerator: Accelerator) -> LeRobotDataset:
     dataset_kwargs = {
         "repo_id": cfg.dataset.repo_id,
         "root": cfg.dataset.root,
@@ -127,9 +128,48 @@ def _load_dataset_distributed(cfg: ValueTrainPipelineConfig, accelerator: Accele
     return dataset
 
 
+def _resolve_checkpoint_source(
+    cfg: ValueInferencePipelineConfig, value_output_dir: Path
+) -> tuple[Path, str]:
+    if cfg.inference.repo_id:
+        checkpoint_root = Path(
+            snapshot_download(
+                repo_id=cfg.inference.repo_id,
+                repo_type="model",
+                revision=cfg.inference.revision,
+            )
+        )
+        logging.info("Loaded checkpoint source from hub repo | repo_id=%s local=%s", cfg.inference.repo_id, checkpoint_root)
+    elif cfg.inference.checkpoint_root is not None:
+        checkpoint_root = Path(cfg.inference.checkpoint_root)
+        logging.info("Loaded checkpoint source from local path | root=%s", checkpoint_root)
+    else:
+        checkpoint_root = value_output_dir / "checkpoints"
+        logging.info("Loaded checkpoint source from output dir | root=%s", checkpoint_root)
+
+    if not checkpoint_root.exists():
+        raise FileNotFoundError(f"Checkpoint root not found: {checkpoint_root}")
+
+    checkpoint_ref = cfg.inference.checkpoint_ref
+    if checkpoint_ref == "last" and not (checkpoint_root / "last").exists():
+        # Support flattened checkpoints uploaded via:
+        # hf upload <repo> <step_dir> . --repo-type model
+        if (checkpoint_root / "weights.pt").is_file() and (checkpoint_root / "value_config.json").is_file():
+            checkpoint_ref = "."
+            logging.info("Checkpoint root is flattened; fallback checkpoint_ref='.'")
+        else:
+            raise FileNotFoundError(
+                f"checkpoint_ref='last' but {checkpoint_root / 'last'} is missing. "
+                "Set --inference.checkpoint_ref explicitly."
+            )
+    return checkpoint_root, checkpoint_ref
+
+
 def _prepare_shared_runtime(
-    cfg: ValueTrainPipelineConfig,
+    cfg: ValueInferencePipelineConfig,
     dataset: LeRobotDataset,
+    model_cfg: SiglipGemmaValueConfig,
+    value_config_payload: dict[str, Any],
     device: torch.device,
 ) -> dict[str, Any]:
     raw_frames = dataset.hf_dataset.with_format(None)
@@ -137,40 +177,49 @@ def _prepare_shared_runtime(
     if frame_count == 0:
         raise ValueError("Dataset has no frames.")
 
-    state_feature_exists = cfg.value.state_feature in dataset.hf_dataset.column_names
-    task_feature_exists = cfg.value.task_index_feature in dataset.hf_dataset.column_names
+    state_feature = str(value_config_payload.get("state_feature", model_cfg.state_feature))
+    task_index_feature = str(value_config_payload.get("task_index_feature", model_cfg.task_index_feature))
+    task_field = str(model_cfg.task_field)
+    num_bins = int(value_config_payload.get("num_bins", model_cfg.num_bins))
+    bin_min = float(value_config_payload.get("bin_min", model_cfg.bin_min))
+    bin_max = float(value_config_payload.get("bin_max", model_cfg.bin_max))
+
+    state_feature_exists = state_feature in dataset.hf_dataset.column_names
+    task_feature_exists = task_index_feature in dataset.hf_dataset.column_names
     success_field_exists = cfg.dataset.success_field in dataset.meta.episodes.column_names
     intervention_field_exists = cfg.acp.intervention_field in dataset.hf_dataset.column_names
-    task_field_exists = cfg.value.task_field == "task" or cfg.value.task_field in dataset.hf_dataset.column_names
+    task_field_exists = task_field == "task" or task_field in dataset.hf_dataset.column_names
     log_input_field_check(
         cfg,
+        state_feature=state_feature,
+        task_feature=task_index_feature,
         state_feature_exists=state_feature_exists,
         task_feature_exists=task_feature_exists,
         success_field_exists=success_field_exists,
         intervention_field_exists=intervention_field_exists,
     )
     if not task_feature_exists:
-        raise KeyError(f"Missing task feature '{cfg.value.task_index_feature}' in dataset columns.")
+        raise KeyError(f"Missing task feature '{task_index_feature}' in dataset columns.")
     if not task_field_exists:
         raise KeyError(
-            f"Missing task field '{cfg.value.task_field}'. "
-            "Use `value.task_field=task` or provide an existing dataset column."
+            f"Missing task field '{task_field}'. "
+            "Set a valid task field in the trained value config."
         )
 
     camera_features_available = [key for key in dataset.meta.camera_keys if key.startswith(OBS_IMAGES)]
     value_preprocessor = SiglipGemmaValuePreprocessor(
-        cfg=cfg.value,
+        cfg=model_cfg,
         dataset_camera_features=camera_features_available,
     )
-    if not cfg.value.camera_features:
-        cfg.value.camera_features = list(value_preprocessor.camera_features)
+    if not model_cfg.camera_features:
+        model_cfg.camera_features = list(value_preprocessor.camera_features)
     logging.info(
         "Value preprocessor setup | task_field=%s cameras=%s",
-        cfg.value.task_field,
+        task_field,
         value_preprocessor.camera_features,
     )
 
-    task_indices = np.asarray(raw_frames[cfg.value.task_index_feature], dtype=np.int64)
+    task_indices = np.asarray(raw_frames[task_index_feature], dtype=np.int64)
     episode_indices = np.asarray(raw_frames["episode_index"], dtype=np.int64)
     frame_indices = np.asarray(raw_frames["frame_index"], dtype=np.int64)
     absolute_indices = np.asarray(raw_frames["index"], dtype=np.int64)
@@ -191,8 +240,8 @@ def _prepare_shared_runtime(
         episode_info=episode_info,
         task_max_lengths=task_max_length,
         c_fail_coef=cfg.targets.c_fail_coef,
-        clip_min=cfg.value.bin_min,
-        clip_max=cfg.value.bin_max,
+        clip_min=bin_min,
+        clip_max=bin_max,
     )
     rewards = compute_normalized_rewards_from_targets(
         targets=value_targets,
@@ -210,12 +259,14 @@ def _prepare_shared_runtime(
     per_task_reward_stats = stats_per_task(rewards, task_indices)
     log_task_target_reward_stats(per_task_target_stats, per_task_reward_stats)
 
-    bin_centers = build_bin_centers(cfg.value.num_bins, cfg.value.bin_min, cfg.value.bin_max, device=device)
+    bin_centers = build_bin_centers(num_bins, bin_min, bin_max, device=device)
 
     return {
         "frame_count": frame_count,
         "num_tasks": num_tasks,
         "state_dim": state_dim,
+        "state_feature": state_feature,
+        "task_index_feature": task_index_feature,
         "value_preprocessor": value_preprocessor,
         "task_indices": task_indices,
         "episode_indices": episode_indices,
@@ -238,7 +289,7 @@ def _prepare_shared_runtime(
 
 
 def _init_value_runtime(
-    cfg: ValueTrainPipelineConfig,
+    cfg: ValueInferencePipelineConfig,
     accelerator: Accelerator,
 ) -> tuple[Path, torch.device]:
     value_output_dir = cfg.output_dir / "value"
@@ -265,39 +316,35 @@ def _init_value_runtime(
 
 
 def run_value_inference_only_pipeline(
-    cfg: ValueTrainPipelineConfig,
+    cfg: ValueInferencePipelineConfig,
     accelerator: Accelerator | None = None,
 ) -> dict[str, Any]:
     cfg.validate()
-    if not isinstance(cfg.value, SiglipGemmaValueConfig):
-        raise ValueError(
-            f"Unsupported value config type '{cfg.value.type}'. "
-            "This pipeline currently expects SiglipGemmaValueConfig."
-        )
 
     accelerator = _create_accelerator(cfg, accelerator)
     value_output_dir, device = _init_value_runtime(cfg, accelerator)
 
     dataset = _load_dataset_distributed(cfg, accelerator)
-    shared = _prepare_shared_runtime(cfg, dataset, device)
-
-    checkpoint_root = value_output_dir / "checkpoints"
-    if accelerator.is_main_process and not checkpoint_root.exists():
-        raise FileNotFoundError(f"Checkpoint directory not found: {checkpoint_root}")
-    accelerator.wait_for_everyone()
-
-    inference_model, _, _ = load_value_model_from_checkpoint(
+    checkpoint_root, checkpoint_ref = _resolve_checkpoint_source(cfg, value_output_dir)
+    inference_model, model_cfg, value_config_payload = load_value_model_from_checkpoint(
         checkpoint_root=checkpoint_root,
-        checkpoint_ref="last",
+        checkpoint_ref=checkpoint_ref,
         device=device,
     )
+    if not isinstance(model_cfg, SiglipGemmaValueConfig):
+        raise ValueError(
+            f"Unsupported value config type '{type(model_cfg)}'. "
+            "This pipeline currently expects SiglipGemmaValueConfig."
+        )
+
+    shared = _prepare_shared_runtime(cfg, dataset, model_cfg, value_config_payload, device)
     inference_model.eval()
 
     inference_loader = DataLoader(
         dataset,
-        batch_size=max(cfg.train.batch_size, 64),
+        batch_size=max(cfg.runtime.batch_size, 64),
         shuffle=False,
-        num_workers=cfg.train.num_workers,
+        num_workers=cfg.runtime.num_workers,
         pin_memory=(device.type == "cuda"),
         drop_last=False,
     )
@@ -414,6 +461,8 @@ def run_value_inference_only_pipeline(
     )
     diagnostics = build_diagnostics_payload(
         cfg=cfg,
+        state_feature=shared["state_feature"],
+        task_feature=shared["task_index_feature"],
         state_feature_exists=shared["state_feature_exists"],
         task_feature_exists=shared["task_feature_exists"],
         success_field_exists=shared["success_field_exists"],
@@ -446,6 +495,7 @@ def run_value_inference_only_pipeline(
         "num_episodes": int(len(shared["episode_info"])),
         "indicator_positive_ratio": positive_ratio_observed,
         "checkpoint_root": str(checkpoint_root),
+        "checkpoint_ref": checkpoint_ref,
         "diagnostics_path": str(diagnostics_path),
         "world_size": int(accelerator.num_processes),
         "main_process": True,
@@ -453,7 +503,7 @@ def run_value_inference_only_pipeline(
 
 
 @parser.wrap()
-def value_infer_only(cfg: ValueTrainPipelineConfig):
+def value_infer_only(cfg: ValueInferencePipelineConfig):
     return run_value_inference_only_pipeline(cfg)
 
 

@@ -29,7 +29,7 @@ from huggingface_hub import HfApi
 from torch.utils.data import DataLoader
 
 from lerobot.configs import parser
-from lerobot.configs.value_train import ValueTrainPipelineConfig
+from lerobot.configs.value import ValueTrainPipelineConfig
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
 from lerobot.datasets.utils import cycle
 from lerobot.utils.constants import OBS_IMAGES
@@ -219,6 +219,8 @@ def _prepare_shared_runtime(
     task_field_exists = cfg.value.task_field == "task" or cfg.value.task_field in dataset.hf_dataset.column_names
     log_input_field_check(
         cfg,
+        state_feature=cfg.value.state_feature,
+        task_feature=cfg.value.task_index_feature,
         state_feature_exists=state_feature_exists,
         task_feature_exists=task_feature_exists,
         success_field_exists=success_field_exists,

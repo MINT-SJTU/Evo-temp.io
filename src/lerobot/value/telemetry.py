@@ -23,7 +23,6 @@ from typing import Any
 
 import numpy as np
 
-from lerobot.configs.value_train import ValueTrainPipelineConfig
 from lerobot.value.algorithms import EpisodeTargetInfo
 
 
@@ -81,7 +80,7 @@ def log_array_stats(name: str, values: np.ndarray) -> dict[str, float]:
     return stats
 
 
-def log_pipeline_summary(cfg: ValueTrainPipelineConfig) -> None:
+def log_pipeline_summary(cfg: Any) -> None:
     logging.info(
         "Value pipeline summary | c_fail_coef=%.4f n_step=%d positive_ratio=%.4f "
         "value_field=%s advantage_field=%s indicator_field=%s",
@@ -95,7 +94,9 @@ def log_pipeline_summary(cfg: ValueTrainPipelineConfig) -> None:
 
 
 def log_input_field_check(
-    cfg: ValueTrainPipelineConfig,
+    cfg: Any,
+    state_feature: str,
+    task_feature: str,
     state_feature_exists: bool,
     task_feature_exists: bool,
     success_field_exists: bool,
@@ -103,9 +104,9 @@ def log_input_field_check(
 ) -> None:
     logging.info(
         "Input field check | state_feature=%s(%s) task_feature=%s(%s) success_field=%s(%s) intervention_field=%s(%s)",
-        cfg.value.state_feature,
+        state_feature,
         state_feature_exists,
-        cfg.value.task_index_feature,
+        task_feature,
         task_feature_exists,
         cfg.dataset.success_field,
         success_field_exists,
@@ -204,7 +205,7 @@ def log_advantage_outputs(
     return advantage_stats, per_task_adv_stats, indicator_positive_ratio_per_task
 
 
-def log_write_modes(cfg: ValueTrainPipelineConfig, write_modes: dict[str, str]) -> None:
+def log_write_modes(cfg: Any, write_modes: dict[str, str]) -> None:
     logging.info(
         "Write mode | %s=%s, %s=%s, %s=%s",
         cfg.acp.value_field,
@@ -225,7 +226,9 @@ def save_diagnostics(diagnostics_dir: Path, diagnostics: dict[str, Any]) -> Path
 
 def build_diagnostics_payload(
     *,
-    cfg: ValueTrainPipelineConfig,
+    cfg: Any,
+    state_feature: str,
+    task_feature: str,
     state_feature_exists: bool,
     task_feature_exists: bool,
     success_field_exists: bool,
@@ -250,11 +253,13 @@ def build_diagnostics_payload(
     indicator_positive_ratio_per_task: dict[int, float],
     write_modes: dict[str, str],
 ) -> dict[str, Any]:
+    train_cfg = getattr(cfg, "train", None)
+    max_steps = int(train_cfg.max_steps) if train_cfg is not None and hasattr(train_cfg, "max_steps") else None
     return {
         "config_summary": {
             "dataset_repo_id": cfg.dataset.repo_id,
-            "state_feature": cfg.value.state_feature,
-            "task_feature": cfg.value.task_index_feature,
+            "state_feature": state_feature,
+            "task_feature": task_feature,
             "success_field": cfg.dataset.success_field,
             "intervention_field": cfg.acp.intervention_field,
             "c_fail_coef": cfg.targets.c_fail_coef,
@@ -262,8 +267,8 @@ def build_diagnostics_payload(
             "positive_ratio": cfg.acp.positive_ratio,
         },
         "input_features_presence": {
-            cfg.value.state_feature: state_feature_exists,
-            cfg.value.task_index_feature: task_feature_exists,
+            state_feature: state_feature_exists,
+            task_feature: task_feature_exists,
             cfg.dataset.success_field: success_field_exists,
             cfg.acp.intervention_field: intervention_field_exists,
         },
@@ -285,7 +290,7 @@ def build_diagnostics_payload(
         "training_summary": {
             "last_loss": float(last_loss),
             "last_value_mae": float(last_value_mae),
-            "max_steps": int(cfg.train.max_steps),
+            "max_steps": max_steps,
         },
         "inference_stats": {
             "global": inference_stats,
