@@ -184,6 +184,7 @@ class ValueInferencePipelineConfig:
     output_dir: Path | None = None
     job_name: str | None = None
     seed: int | None = 42
+    push_to_hub: bool = False
 
     def validate(self) -> None:
         self.inference.validate()
@@ -199,6 +200,10 @@ class ValueInferencePipelineConfig:
         self.dataset.default_success = normalized_default
         if not self.dataset.success_field:
             raise ValueError("'dataset.success_field' must be non-empty.")
+        if self.push_to_hub and self.dataset.episodes is not None:
+            raise ValueError(
+                "'dataset.episodes' must be unset when 'push_to_hub=true' to avoid pushing partial datasets."
+            )
 
         if not self.job_name:
             dataset_id = self.dataset.repo_id.replace("/", "_")
