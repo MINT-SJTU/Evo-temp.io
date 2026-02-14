@@ -28,9 +28,9 @@ Use:
 
 ```bash
 export HF_HOME=/llm_jzm/cache/huggingface/
-export HF_TOKEN=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
+export HF_TOKEN=<SHARED_HF_TOKEN>
 export HF_ENDPOINT=https://hf-mirror.com
-export WANDB_API_KEY=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
+export WANDB_API_KEY=<SHARED_WANDB_API_KEY>
 wandb login --relogin "$WANDB_API_KEY"
 ```
 
