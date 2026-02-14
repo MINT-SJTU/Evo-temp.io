@@ -92,7 +92,7 @@ class SiglipGemmaValueConfig(ValueModelConfig):
     dtype: str = "float32"
     freeze_vision_encoder: bool = False
     freeze_language_model: bool = False
-    use_gradient_checkpointing: bool = True
+    use_gradient_checkpointing: bool = False
 
     def validate(self) -> None:
         super().validate()

@@ -33,3 +33,11 @@ export HF_ENDPOINT=https://hf-mirror.com
 export WANDB_API_KEY=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
 wandb login --relogin "$WANDB_API_KEY"
 ```
+
+## User Preferences
+
+- During coding, avoid try/except unless explicitly requested; prefer direct and rough failure/debug output.
+- Reuse existing code/tools first; do not rebuild from scratch unless needed.
+- For every experiment run request (e.g., training/evaluation runs), always create a new Notion page with purpose, exact parameters/command, and key results/observations.
+- Debug/troubleshooting runs do not count as experiments by default, and do not require creating a Notion experiment page unless explicitly requested.
+- Write complete notes proactively and boldly; user will decide what to keep.
