@@ -104,6 +104,8 @@ class ValueTrainPipelineConfig:
     output_dir: Path | None = None
     job_name: str | None = None
     seed: int | None = 42
+    push_to_hub: bool = False
+    repo_id: str | None = None
     wandb: WandBConfig = field(default_factory=WandBConfig)
     use_value_training_preset: bool = True
     optimizer: OptimizerConfig | None = None
@@ -123,6 +125,8 @@ class ValueTrainPipelineConfig:
         self.dataset.default_success = normalized_default
         if not self.dataset.success_field:
             raise ValueError("'dataset.success_field' must be non-empty.")
+        if self.push_to_hub and not self.repo_id:
+            raise ValueError("'repo_id' argument missing. Please specify it to push the model to the hub.")
 
         if self.use_value_training_preset:
             self.optimizer = self.value.get_optimizer_preset()

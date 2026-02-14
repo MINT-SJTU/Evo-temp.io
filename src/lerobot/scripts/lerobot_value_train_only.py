@@ -25,6 +25,7 @@ import numpy as np
 import torch
 from accelerate import Accelerator
 from accelerate.utils import DistributedDataParallelKwargs
+from huggingface_hub import HfApi
 from torch.utils.data import DataLoader
 
 from lerobot.configs import parser
@@ -147,6 +148,41 @@ def _build_wandb_run(cfg: ValueTrainPipelineConfig, accelerator: Accelerator):
     )
     logging.info("Track this run --> %s", run.get_url())
     return run
+
+
+def _resolve_last_checkpoint_dir(checkpoint_root: Path) -> Path:
+    last_path = checkpoint_root / "last"
+    if last_path.is_symlink():
+        return last_path.resolve()
+    if last_path.is_dir():
+        return last_path
+    if last_path.is_file():
+        pointed = last_path.read_text(encoding="utf-8").strip()
+        if not pointed:
+            raise ValueError(f"Checkpoint pointer file is empty: {last_path}")
+        step_dir = checkpoint_root / pointed
+        if step_dir.is_dir():
+            return step_dir
+    raise FileNotFoundError(f"Could not resolve final checkpoint from {last_path}")
+
+
+def _push_last_checkpoint_to_hub(cfg: ValueTrainPipelineConfig, checkpoint_root: Path) -> str:
+    if cfg.repo_id is None:
+        raise ValueError("'repo_id' must be provided when 'push_to_hub=true'.")
+
+    step_dir = _resolve_last_checkpoint_dir(checkpoint_root)
+    api = HfApi()
+    api.create_repo(repo_id=cfg.repo_id, repo_type="model", exist_ok=True)
+    logging.info("Push final value checkpoint to hub | repo_id=%s source=%s path_in_repo=.", cfg.repo_id, step_dir)
+    commit_url = api.upload_folder(
+        repo_id=cfg.repo_id,
+        repo_type="model",
+        folder_path=step_dir,
+        path_in_repo=".",
+        commit_message=f"Upload value checkpoint {step_dir.name}",
+    )
+    logging.info("Hub upload complete | repo_id=%s commit=%s", cfg.repo_id, commit_url)
+    return commit_url
 
 
 def _load_dataset_distributed(cfg: ValueTrainPipelineConfig, accelerator: Accelerator) -> LeRobotDataset:
@@ -439,6 +475,10 @@ def run_value_training_only_pipeline(
         wandb_run.finish()
 
     accelerator.wait_for_everyone()
+    hub_commit_url = None
+    if accelerator.is_main_process and cfg.push_to_hub:
+        hub_commit_url = _push_last_checkpoint_to_hub(cfg, checkpoint_root)
+
     if accelerator.is_main_process:
         return {
             "num_frames": int(shared["frame_count"]),
@@ -446,6 +486,8 @@ def run_value_training_only_pipeline(
             "last_loss": float(last_loss),
             "last_value_mae": float(last_mae),
             "checkpoint_root": str(checkpoint_root),
+            "hub_repo_id": cfg.repo_id if cfg.push_to_hub else None,
+            "hub_commit_url": hub_commit_url,
             "world_size": int(accelerator.num_processes),
         }
     return {"world_size": int(accelerator.num_processes), "main_process": False}
