@@ -35,6 +35,7 @@ from lerobot.envs.utils import close_envs
 from lerobot.optim.factory import make_optimizer_and_scheduler
 from lerobot.policies.factory import make_policy, make_pre_post_processors
 from lerobot.policies.pretrained import PreTrainedPolicy
+from lerobot.rl.acp_dataset_stats import compute_acp_indicator_stats
 from lerobot.rl.acp_hook import build_acp_raw_batch_hook
 from lerobot.rl.wandb_utils import WandBLogger
 from lerobot.scripts.lerobot_eval import eval_policy_all
@@ -219,6 +220,36 @@ def train(
     if is_main_process:
         logging.info("Creating dataset")
         dataset = make_dataset(cfg)
+        if cfg.acp.enable:
+            indicator_stats = compute_acp_indicator_stats(dataset, cfg.acp.indicator_field)
+            if indicator_stats is None:
+                logging.warning(
+                    "ACP is enabled but indicator statistics are unavailable for field '%s'.",
+                    cfg.acp.indicator_field,
+                )
+            else:
+                if indicator_stats.total_count >= 0:
+                    logging.info(
+                        "ACP indicator stats (%s): field='%s' ratio=%.6f positive=%d total=%d",
+                        indicator_stats.source,
+                        indicator_stats.indicator_field,
+                        indicator_stats.positive_ratio,
+                        indicator_stats.positive_count,
+                        indicator_stats.total_count,
+                    )
+                else:
+                    logging.info(
+                        "ACP indicator stats (%s): field='%s' ratio=%.6f",
+                        indicator_stats.source,
+                        indicator_stats.indicator_field,
+                        indicator_stats.positive_ratio,
+                    )
+                if indicator_stats.invalid_count > 0:
+                    logging.warning(
+                        "ACP indicator field '%s' contains %d non-binary values (expected only 0/1).",
+                        indicator_stats.indicator_field,
+                        indicator_stats.invalid_count,
+                    )
 
     accelerator.wait_for_everyone()
 
