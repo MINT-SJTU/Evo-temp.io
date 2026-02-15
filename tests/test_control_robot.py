@@ -16,13 +16,19 @@
 
 from unittest.mock import MagicMock, patch
 
+import numpy as np
+import pytest
+import torch
+
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
 from lerobot.scripts.lerobot_calibrate import CalibrateConfig, calibrate
 from lerobot.scripts.lerobot_human_inloop_record import human_inloop_record
 from lerobot.scripts.lerobot_record import (
+    ACPInferenceConfig,
     DatasetRecordConfig,
     PolicySyncDualArmExecutor,
     RecordConfig,
+    _predict_policy_action_with_acp_inference,
     record_loop,
     record,
 )
@@ -247,3 +253,110 @@ def test_policy_sync_dual_arm_executor():
     assert sent_action == action
     robot.send_action.assert_called_once_with(action)
     teleop.send_feedback.assert_called_once_with(action)
+
+
+def test_record_config_rejects_cfg_without_acp_enable():
+    robot_cfg = MockRobotConfig()
+    teleop_cfg = MockTeleopConfig()
+    dataset_cfg = DatasetRecordConfig(
+        repo_id=DUMMY_REPO_ID,
+        single_task="Dummy task",
+        num_episodes=1,
+        episode_time_s=0.1,
+        reset_time_s=0,
+        push_to_hub=False,
+    )
+
+    with pytest.raises(ValueError, match="acp_inference.use_cfg=true"):
+        RecordConfig(
+            robot=robot_cfg,
+            dataset=dataset_cfg,
+            teleop=teleop_cfg,
+            play_sounds=False,
+            acp_inference=ACPInferenceConfig(enable=False, use_cfg=True, cfg_beta=0.6),
+        )
+
+
+def test_record_config_rejects_negative_cfg_beta():
+    robot_cfg = MockRobotConfig()
+    teleop_cfg = MockTeleopConfig()
+    dataset_cfg = DatasetRecordConfig(
+        repo_id=DUMMY_REPO_ID,
+        single_task="Dummy task",
+        num_episodes=1,
+        episode_time_s=0.1,
+        reset_time_s=0,
+        push_to_hub=False,
+    )
+
+    with pytest.raises(ValueError, match="cfg_beta"):
+        RecordConfig(
+            robot=robot_cfg,
+            dataset=dataset_cfg,
+            teleop=teleop_cfg,
+            play_sounds=False,
+            acp_inference=ACPInferenceConfig(enable=True, use_cfg=False, cfg_beta=-0.1),
+        )
+
+
+def test_acp_inference_without_cfg_appends_positive_prompt():
+    class _StaticPolicy:
+        def __init__(self, value: float):
+            self.value = value
+            self.tasks = []
+
+        def select_action(self, batch):
+            self.tasks.append(batch["task"])
+            return torch.tensor([[self.value, self.value, self.value]], dtype=torch.float32)
+
+    observation_frame = {"observation.state": np.array([0.0, 0.0, 0.0], dtype=np.float32)}
+    policy = _StaticPolicy(value=2.0)
+
+    action = _predict_policy_action_with_acp_inference(
+        observation_frame=observation_frame,
+        policy=policy,
+        device=torch.device("cpu"),
+        preprocessor=lambda x: x,
+        postprocessor=lambda x: x,
+        use_amp=False,
+        task="Pick and place",
+        robot_type="mock_robot",
+        acp_inference=ACPInferenceConfig(enable=True, use_cfg=False, cfg_beta=0.6),
+    )
+
+    assert torch.allclose(action, torch.tensor([[2.0, 2.0, 2.0]], dtype=torch.float32))
+    assert policy.tasks[-1] == "Pick and place\nAdvantage: positive"
+
+
+def test_acp_inference_with_cfg_blends_cond_and_uncond_actions():
+    class _StaticPolicy:
+        def __init__(self, value: float):
+            self.value = value
+            self.tasks = []
+
+        def select_action(self, batch):
+            self.tasks.append(batch["task"])
+            return torch.tensor([[self.value, self.value, self.value]], dtype=torch.float32)
+
+    observation_frame = {"observation.state": np.array([0.0, 0.0, 0.0], dtype=np.float32)}
+    policy_cond = _StaticPolicy(value=3.0)
+    policy_uncond = _StaticPolicy(value=1.0)
+
+    action = _predict_policy_action_with_acp_inference(
+        observation_frame=observation_frame,
+        policy=policy_cond,
+        device=torch.device("cpu"),
+        preprocessor=lambda x: x,
+        postprocessor=lambda x: x,
+        use_amp=False,
+        task="Pick and place",
+        robot_type="mock_robot",
+        acp_inference=ACPInferenceConfig(enable=True, use_cfg=True, cfg_beta=0.5),
+        policy_uncond=policy_uncond,
+        preprocessor_uncond=lambda x: x,
+        postprocessor_uncond=lambda x: x,
+    )
+
+    assert torch.allclose(action, torch.tensor([[2.0, 2.0, 2.0]], dtype=torch.float32))
+    assert policy_cond.tasks[-1] == "Pick and place\nAdvantage: positive"
+    assert policy_uncond.tasks[-1] == "Pick and place"

@@ -71,6 +71,7 @@ from pprint import pformat
 from typing import Any
 
 import numpy as np
+import torch
 
 from lerobot.cameras import (  # noqa: F401
     CameraConfig,  # noqa: F401
@@ -200,6 +201,13 @@ class DatasetRecordConfig:
 
 
 @dataclass
+class ACPInferenceConfig:
+    enable: bool = False
+    use_cfg: bool = False
+    cfg_beta: float = 1.0
+
+
+@dataclass
 class RecordConfig:
     robot: RobotConfig
     dataset: DatasetRecordConfig
@@ -243,6 +251,8 @@ class RecordConfig:
     collector_policy_id_policy: str | None = None
     # Policy identifier used when action source is human/teleop.
     collector_policy_id_human: str = "human"
+    # ACP inference controls for policy-driven recording.
+    acp_inference: ACPInferenceConfig = field(default_factory=ACPInferenceConfig)
 
     def __post_init__(self):
         # HACK: We parse again the cli args here to get the pretrained path if there was one.
@@ -283,11 +293,105 @@ class RecordConfig:
 
         if not self.collector_policy_id_human:
             raise ValueError("`collector_policy_id_human` must be a non-empty string.")
+        if self.acp_inference.use_cfg and not self.acp_inference.enable:
+            raise ValueError("`acp_inference.use_cfg=true` requires `acp_inference.enable=true`.")
+        if self.acp_inference.cfg_beta < 0:
+            raise ValueError("`acp_inference.cfg_beta` must be >= 0.")
 
     @classmethod
     def __get_path_fields__(cls) -> list[str]:
         """This enables the parser to load config from the policy using `--policy.path=local/dir`"""
         return ["policy"]
+
+
+ACP_DEFAULT_POSITIVE_TAG = "Advantage: positive"
+
+
+def _build_acp_positive_task(task: str | None) -> str:
+    base_task = task or ""
+    if not base_task:
+        return ACP_DEFAULT_POSITIVE_TAG
+    return f"{base_task}\n{ACP_DEFAULT_POSITIVE_TAG}"
+
+
+def _get_torch_rng_state(device: torch.device) -> tuple[torch.Tensor, torch.Tensor | None]:
+    cpu_state = torch.get_rng_state()
+    cuda_state = torch.cuda.get_rng_state(device) if device.type == "cuda" else None
+    return cpu_state, cuda_state
+
+
+def _set_torch_rng_state(device: torch.device, cpu_state: torch.Tensor, cuda_state: torch.Tensor | None) -> None:
+    torch.set_rng_state(cpu_state)
+    if device.type == "cuda" and cuda_state is not None:
+        torch.cuda.set_rng_state(cuda_state, device)
+
+
+def _predict_policy_action_with_acp_inference(
+    *,
+    observation_frame: dict[str, np.ndarray],
+    policy: PreTrainedPolicy,
+    device: torch.device,
+    preprocessor: PolicyProcessorPipeline[dict[str, Any], dict[str, Any]],
+    postprocessor: PolicyProcessorPipeline[PolicyAction, PolicyAction],
+    use_amp: bool,
+    task: str | None,
+    robot_type: str | None,
+    acp_inference: ACPInferenceConfig,
+    policy_uncond: PreTrainedPolicy | None = None,
+    preprocessor_uncond: PolicyProcessorPipeline[dict[str, Any], dict[str, Any]] | None = None,
+    postprocessor_uncond: PolicyProcessorPipeline[PolicyAction, PolicyAction] | None = None,
+) -> PolicyAction:
+    if not acp_inference.enable:
+        return predict_action(
+            observation=observation_frame,
+            policy=policy,
+            device=device,
+            preprocessor=preprocessor,
+            postprocessor=postprocessor,
+            use_amp=use_amp,
+            task=task,
+            robot_type=robot_type,
+        )
+
+    conditional_task = _build_acp_positive_task(task)
+    if not acp_inference.use_cfg:
+        return predict_action(
+            observation=observation_frame,
+            policy=policy,
+            device=device,
+            preprocessor=preprocessor,
+            postprocessor=postprocessor,
+            use_amp=use_amp,
+            task=conditional_task,
+            robot_type=robot_type,
+        )
+
+    if policy_uncond is None or preprocessor_uncond is None or postprocessor_uncond is None:
+        raise ValueError("CFG inference requires unconditioned policy and processors.")
+
+    cpu_state, cuda_state = _get_torch_rng_state(device)
+    action_cond = predict_action(
+        observation=observation_frame,
+        policy=policy,
+        device=device,
+        preprocessor=preprocessor,
+        postprocessor=postprocessor,
+        use_amp=use_amp,
+        task=conditional_task,
+        robot_type=robot_type,
+    )
+    _set_torch_rng_state(device, cpu_state, cuda_state)
+    action_uncond = predict_action(
+        observation=observation_frame,
+        policy=policy_uncond,
+        device=device,
+        preprocessor=preprocessor_uncond,
+        postprocessor=postprocessor_uncond,
+        use_amp=use_amp,
+        task=task,
+        robot_type=robot_type,
+    )
+    return action_uncond + acp_inference.cfg_beta * (action_cond - action_uncond)
 
 
 class PolicySyncDualArmExecutor:
@@ -368,8 +472,11 @@ def record_loop(
     dataset: LeRobotDataset | None = None,
     teleop: Teleoperator | list[Teleoperator] | None = None,
     policy: PreTrainedPolicy | None = None,
+    policy_uncond: PreTrainedPolicy | None = None,
     preprocessor: PolicyProcessorPipeline[dict[str, Any], dict[str, Any]] | None = None,
+    preprocessor_uncond: PolicyProcessorPipeline[dict[str, Any], dict[str, Any]] | None = None,
     postprocessor: PolicyProcessorPipeline[PolicyAction, PolicyAction] | None = None,
+    postprocessor_uncond: PolicyProcessorPipeline[PolicyAction, PolicyAction] | None = None,
     control_time_s: int | None = None,
     single_task: str | None = None,
     display_data: bool = False,
@@ -378,7 +485,11 @@ def record_loop(
     intervention_state_machine_enabled: bool = True,
     collector_policy_id_policy: str = "policy",
     collector_policy_id_human: str = "human",
+    acp_inference: ACPInferenceConfig | None = None,
 ):
+    if acp_inference is None:
+        acp_inference = ACPInferenceConfig()
+
     if dataset is not None and dataset.fps != fps:
         raise ValueError(f"The dataset fps should be equal to requested fps ({dataset.fps} != {fps}).")
 
@@ -448,6 +559,10 @@ def record_loop(
         policy.reset()
         preprocessor.reset()
         postprocessor.reset()
+    if policy_uncond is not None and preprocessor_uncond is not None and postprocessor_uncond is not None:
+        policy_uncond.reset()
+        preprocessor_uncond.reset()
+        postprocessor_uncond.reset()
 
     if intervention_enabled:
         # Start in S0: policy drives both arms, teleop arm should accept feedback commands.
@@ -476,6 +591,15 @@ def record_loop(
                         policy.reset()
                         preprocessor.reset()
                         postprocessor.reset()
+                    if (
+                        policy_uncond is not None
+                        and preprocessor_uncond is not None
+                        and postprocessor_uncond is not None
+                    ):
+                        policy_uncond.reset()
+                        preprocessor_uncond.reset()
+                        postprocessor_uncond.reset()
+                    if policy is not None and preprocessor is not None and postprocessor is not None:
                         logging.info("Policy cache reset on release: next policy action is recomputed.")
                     logging.info("Intervention release requested (S2): returning control to policy.")
             else:
@@ -494,8 +618,8 @@ def record_loop(
         act_processed_policy: RobotAction | None = None
         act_processed_teleop: RobotAction | None = None
         if policy is not None and preprocessor is not None and postprocessor is not None:
-            policy_action = predict_action(
-                observation=observation_frame,
+            policy_action = _predict_policy_action_with_acp_inference(
+                observation_frame=observation_frame,
                 policy=policy,
                 device=get_safe_torch_device(policy.config.device),
                 preprocessor=preprocessor,
@@ -503,6 +627,10 @@ def record_loop(
                 use_amp=policy.config.use_amp,
                 task=single_task,
                 robot_type=robot.robot_type,
+                acp_inference=acp_inference,
+                policy_uncond=policy_uncond,
+                preprocessor_uncond=preprocessor_uncond,
+                postprocessor_uncond=postprocessor_uncond,
             )
 
             act_processed_policy = make_robot_action(policy_action, dataset.features)
@@ -679,6 +807,9 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
     dataset = None
     listener = None
     policy_sync_executor = None
+    policy_uncond = None
+    preprocessor_uncond = None
+    postprocessor_uncond = None
 
     try:
         if cfg.resume:
@@ -715,6 +846,8 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
         policy = None if cfg.policy is None else make_policy(cfg.policy, ds_meta=dataset.meta)
         preprocessor = None
         postprocessor = None
+        if cfg.acp_inference.enable and cfg.policy is None:
+            raise ValueError("`acp_inference.enable=true` requires `policy` to be set.")
         if cfg.policy is not None:
             preprocessor, postprocessor = make_pre_post_processors(
                 policy_cfg=cfg.policy,
@@ -725,6 +858,17 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
                     "rename_observations_processor": {"rename_map": cfg.dataset.rename_map},
                 },
             )
+            if cfg.acp_inference.enable and cfg.acp_inference.use_cfg:
+                policy_uncond = make_policy(cfg.policy, ds_meta=dataset.meta)
+                preprocessor_uncond, postprocessor_uncond = make_pre_post_processors(
+                    policy_cfg=cfg.policy,
+                    pretrained_path=cfg.policy.pretrained_path,
+                    dataset_stats=rename_stats(dataset.meta.stats, cfg.dataset.rename_map),
+                    preprocessor_overrides={
+                        "device_processor": {"device": cfg.policy.device},
+                        "rename_observations_processor": {"rename_map": cfg.dataset.rename_map},
+                    },
+                )
 
         collector_policy_id_policy = (
             cfg.collector_policy_id_policy
@@ -770,8 +914,11 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
                     robot_observation_processor=robot_observation_processor,
                     teleop=teleop,
                     policy=policy,
+                    policy_uncond=policy_uncond,
                     preprocessor=preprocessor,
+                    preprocessor_uncond=preprocessor_uncond,
                     postprocessor=postprocessor,
+                    postprocessor_uncond=postprocessor_uncond,
                     dataset=dataset,
                     control_time_s=cfg.dataset.episode_time_s,
                     single_task=cfg.dataset.single_task,
@@ -781,6 +928,7 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
                     intervention_state_machine_enabled=cfg.intervention_state_machine_enabled,
                     collector_policy_id_policy=collector_policy_id_policy,
                     collector_policy_id_human=collector_policy_id_human,
+                    acp_inference=cfg.acp_inference,
                 )
 
                 episode_success = None
@@ -823,6 +971,7 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
                         intervention_state_machine_enabled=cfg.intervention_state_machine_enabled,
                         collector_policy_id_policy=collector_policy_id_policy,
                         collector_policy_id_human=collector_policy_id_human,
+                        acp_inference=cfg.acp_inference,
                     )
 
                 if events["rerecord_episode"]:
