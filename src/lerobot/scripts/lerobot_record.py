@@ -64,7 +64,9 @@ lerobot-record \
 
 import logging
 import time
+from collections import deque
 from concurrent.futures import ThreadPoolExecutor
+from copy import deepcopy
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from pprint import pformat
@@ -305,6 +307,7 @@ class RecordConfig:
 
 
 ACP_DEFAULT_POSITIVE_TAG = "Advantage: positive"
+POLICY_RUNTIME_STATE_KEYS = ("_action_queue", "_queues", "_prev_mean")
 
 
 def _build_acp_positive_task(task: str | None) -> str:
@@ -326,6 +329,61 @@ def _set_torch_rng_state(device: torch.device, cpu_state: torch.Tensor, cuda_sta
         torch.cuda.set_rng_state(cuda_state, device)
 
 
+def _clone_runtime_value(value: Any) -> Any:
+    if isinstance(value, torch.Tensor):
+        return value.detach().clone()
+    if isinstance(value, deque):
+        return deque((_clone_runtime_value(item) for item in value), maxlen=value.maxlen)
+    if isinstance(value, dict):
+        return {key: _clone_runtime_value(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_clone_runtime_value(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_clone_runtime_value(item) for item in value)
+    return deepcopy(value)
+
+
+def _capture_policy_runtime_state(policy: PreTrainedPolicy) -> dict[str, Any]:
+    state: dict[str, Any] = {}
+    for key in POLICY_RUNTIME_STATE_KEYS:
+        if hasattr(policy, key):
+            state[key] = _clone_runtime_value(getattr(policy, key))
+    return state
+
+
+def _restore_policy_runtime_state(policy: PreTrainedPolicy, state: dict[str, Any]) -> None:
+    for key, value in state.items():
+        setattr(policy, key, _clone_runtime_value(value))
+
+
+def _predict_policy_action_with_runtime_state(
+    *,
+    observation_frame: dict[str, np.ndarray],
+    policy: PreTrainedPolicy,
+    device: torch.device,
+    preprocessor: PolicyProcessorPipeline[dict[str, Any], dict[str, Any]],
+    postprocessor: PolicyProcessorPipeline[PolicyAction, PolicyAction],
+    use_amp: bool,
+    task: str | None,
+    robot_type: str | None,
+    runtime_state: dict[str, Any],
+) -> PolicyAction:
+    _restore_policy_runtime_state(policy, runtime_state)
+    action = predict_action(
+        observation=observation_frame,
+        policy=policy,
+        device=device,
+        preprocessor=preprocessor,
+        postprocessor=postprocessor,
+        use_amp=use_amp,
+        task=task,
+        robot_type=robot_type,
+    )
+    runtime_state.clear()
+    runtime_state.update(_capture_policy_runtime_state(policy))
+    return action
+
+
 def _predict_policy_action_with_acp_inference(
     *,
     observation_frame: dict[str, np.ndarray],
@@ -337,9 +395,8 @@ def _predict_policy_action_with_acp_inference(
     task: str | None,
     robot_type: str | None,
     acp_inference: ACPInferenceConfig,
-    policy_uncond: PreTrainedPolicy | None = None,
-    preprocessor_uncond: PolicyProcessorPipeline[dict[str, Any], dict[str, Any]] | None = None,
-    postprocessor_uncond: PolicyProcessorPipeline[PolicyAction, PolicyAction] | None = None,
+    cond_runtime_state: dict[str, Any] | None = None,
+    uncond_runtime_state: dict[str, Any] | None = None,
 ) -> PolicyAction:
     if not acp_inference.enable:
         return predict_action(
@@ -366,12 +423,12 @@ def _predict_policy_action_with_acp_inference(
             robot_type=robot_type,
         )
 
-    if policy_uncond is None or preprocessor_uncond is None or postprocessor_uncond is None:
-        raise ValueError("CFG inference requires unconditioned policy and processors.")
+    if cond_runtime_state is None or uncond_runtime_state is None:
+        raise ValueError("CFG inference requires cond/uncond runtime states.")
 
     cpu_state, cuda_state = _get_torch_rng_state(device)
-    action_cond = predict_action(
-        observation=observation_frame,
+    action_cond = _predict_policy_action_with_runtime_state(
+        observation_frame=observation_frame,
         policy=policy,
         device=device,
         preprocessor=preprocessor,
@@ -379,17 +436,19 @@ def _predict_policy_action_with_acp_inference(
         use_amp=use_amp,
         task=conditional_task,
         robot_type=robot_type,
+        runtime_state=cond_runtime_state,
     )
     _set_torch_rng_state(device, cpu_state, cuda_state)
-    action_uncond = predict_action(
-        observation=observation_frame,
-        policy=policy_uncond,
+    action_uncond = _predict_policy_action_with_runtime_state(
+        observation_frame=observation_frame,
+        policy=policy,
         device=device,
-        preprocessor=preprocessor_uncond,
-        postprocessor=postprocessor_uncond,
+        preprocessor=preprocessor,
+        postprocessor=postprocessor,
         use_amp=use_amp,
         task=task,
         robot_type=robot_type,
+        runtime_state=uncond_runtime_state,
     )
     return action_uncond + acp_inference.cfg_beta * (action_cond - action_uncond)
 
@@ -472,11 +531,8 @@ def record_loop(
     dataset: LeRobotDataset | None = None,
     teleop: Teleoperator | list[Teleoperator] | None = None,
     policy: PreTrainedPolicy | None = None,
-    policy_uncond: PreTrainedPolicy | None = None,
     preprocessor: PolicyProcessorPipeline[dict[str, Any], dict[str, Any]] | None = None,
-    preprocessor_uncond: PolicyProcessorPipeline[dict[str, Any], dict[str, Any]] | None = None,
     postprocessor: PolicyProcessorPipeline[PolicyAction, PolicyAction] | None = None,
-    postprocessor_uncond: PolicyProcessorPipeline[PolicyAction, PolicyAction] | None = None,
     control_time_s: int | None = None,
     single_task: str | None = None,
     display_data: bool = False,
@@ -559,10 +615,16 @@ def record_loop(
         policy.reset()
         preprocessor.reset()
         postprocessor.reset()
-    if policy_uncond is not None and preprocessor_uncond is not None and postprocessor_uncond is not None:
-        policy_uncond.reset()
-        preprocessor_uncond.reset()
-        postprocessor_uncond.reset()
+
+    cond_policy_runtime_state: dict[str, Any] | None = None
+    uncond_policy_runtime_state: dict[str, Any] | None = None
+    if (
+        policy is not None
+        and acp_inference.enable
+        and acp_inference.use_cfg
+    ):
+        cond_policy_runtime_state = _capture_policy_runtime_state(policy)
+        uncond_policy_runtime_state = _capture_policy_runtime_state(policy)
 
     if intervention_enabled:
         # Start in S0: policy drives both arms, teleop arm should accept feedback commands.
@@ -591,14 +653,9 @@ def record_loop(
                         policy.reset()
                         preprocessor.reset()
                         postprocessor.reset()
-                    if (
-                        policy_uncond is not None
-                        and preprocessor_uncond is not None
-                        and postprocessor_uncond is not None
-                    ):
-                        policy_uncond.reset()
-                        preprocessor_uncond.reset()
-                        postprocessor_uncond.reset()
+                        if acp_inference.enable and acp_inference.use_cfg:
+                            cond_policy_runtime_state = _capture_policy_runtime_state(policy)
+                            uncond_policy_runtime_state = _capture_policy_runtime_state(policy)
                     if policy is not None and preprocessor is not None and postprocessor is not None:
                         logging.info("Policy cache reset on release: next policy action is recomputed.")
                     logging.info("Intervention release requested (S2): returning control to policy.")
@@ -628,9 +685,8 @@ def record_loop(
                 task=single_task,
                 robot_type=robot.robot_type,
                 acp_inference=acp_inference,
-                policy_uncond=policy_uncond,
-                preprocessor_uncond=preprocessor_uncond,
-                postprocessor_uncond=postprocessor_uncond,
+                cond_runtime_state=cond_policy_runtime_state,
+                uncond_runtime_state=uncond_policy_runtime_state,
             )
 
             act_processed_policy = make_robot_action(policy_action, dataset.features)
@@ -807,9 +863,6 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
     dataset = None
     listener = None
     policy_sync_executor = None
-    policy_uncond = None
-    preprocessor_uncond = None
-    postprocessor_uncond = None
 
     try:
         if cfg.resume:
@@ -858,17 +911,6 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
                     "rename_observations_processor": {"rename_map": cfg.dataset.rename_map},
                 },
             )
-            if cfg.acp_inference.enable and cfg.acp_inference.use_cfg:
-                policy_uncond = make_policy(cfg.policy, ds_meta=dataset.meta)
-                preprocessor_uncond, postprocessor_uncond = make_pre_post_processors(
-                    policy_cfg=cfg.policy,
-                    pretrained_path=cfg.policy.pretrained_path,
-                    dataset_stats=rename_stats(dataset.meta.stats, cfg.dataset.rename_map),
-                    preprocessor_overrides={
-                        "device_processor": {"device": cfg.policy.device},
-                        "rename_observations_processor": {"rename_map": cfg.dataset.rename_map},
-                    },
-                )
 
         collector_policy_id_policy = (
             cfg.collector_policy_id_policy
@@ -914,11 +956,8 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
                     robot_observation_processor=robot_observation_processor,
                     teleop=teleop,
                     policy=policy,
-                    policy_uncond=policy_uncond,
                     preprocessor=preprocessor,
-                    preprocessor_uncond=preprocessor_uncond,
                     postprocessor=postprocessor,
-                    postprocessor_uncond=postprocessor_uncond,
                     dataset=dataset,
                     control_time_s=cfg.dataset.episode_time_s,
                     single_task=cfg.dataset.single_task,
