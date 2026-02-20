@@ -690,6 +690,51 @@ def test_delete_episodes_preserves_tasks(sample_dataset, tmp_path):
     assert len(tasks_in_dataset) > 0
 
 
+def test_delete_episodes_preserves_extra_episode_metadata(tmp_path, empty_lerobot_dataset_factory):
+    """Test that delete_episodes keeps non-default episode metadata (e.g. episode_success)."""
+    features = {
+        "action": {"dtype": "float32", "shape": (2,), "names": None},
+        "observation.state": {"dtype": "float32", "shape": (2,), "names": None},
+    }
+    dataset = empty_lerobot_dataset_factory(
+        root=tmp_path / "dataset_with_episode_metadata",
+        features=features,
+    )
+
+    episode_success_labels = ["success", "failure", "success"]
+    for ep_idx, label in enumerate(episode_success_labels):
+        for _ in range(5):
+            frame = {
+                "action": np.random.randn(2).astype(np.float32),
+                "observation.state": np.random.randn(2).astype(np.float32),
+                "task": f"task_{ep_idx}",
+            }
+            dataset.add_frame(frame)
+        dataset.save_episode(extra_episode_metadata={"episode_success": label})
+
+    dataset.finalize()
+    output_dir = tmp_path / "filtered"
+
+    with (
+        patch("lerobot.datasets.lerobot_dataset.get_safe_version") as mock_get_safe_version,
+        patch("lerobot.datasets.lerobot_dataset.snapshot_download") as mock_snapshot_download,
+    ):
+        mock_get_safe_version.return_value = "v3.0"
+        mock_snapshot_download.return_value = str(output_dir)
+
+        new_dataset = delete_episodes(
+            dataset,
+            episode_indices=[1],
+            output_dir=output_dir,
+        )
+
+    assert "episode_success" in new_dataset.meta.episodes.column_names
+    assert [new_dataset.meta.episodes[i]["episode_success"] for i in range(new_dataset.meta.total_episodes)] == [
+        "success",
+        "success",
+    ]
+
+
 def test_split_three_ways(sample_dataset, tmp_path):
     """Test splitting dataset into three splits."""
     splits = {

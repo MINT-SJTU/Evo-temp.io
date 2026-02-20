@@ -825,6 +825,23 @@ def _copy_and_reindex_episodes_metadata(
     all_stats = []
     total_frames = 0
 
+    # Collect optional episode-level metadata keys (e.g. episode_success) that may not
+    # exist in every parquet shard. We keep a stable key order and later fill missing
+    # values with None so parquet schema remains consistent while writing batches.
+    episodes_dir = src_dataset.root / "meta/episodes"
+    preserved_episode_metadata_keys: list[str] = []
+    seen_preserved_keys: set[str] = set()
+    for parquet_path in sorted(episodes_dir.glob("*/*.parquet")):
+        schema = pq.read_schema(parquet_path)
+        for key in schema.names:
+            if key in {"episode_index", "tasks", "length"}:
+                continue
+            if key.startswith("stats/") or key.startswith("__index_level_") or key.startswith("meta/episodes/"):
+                continue
+            if key not in seen_preserved_keys:
+                seen_preserved_keys.add(key)
+                preserved_episode_metadata_keys.append(key)
+
     for old_idx, new_idx in tqdm(
         sorted(episode_mapping.items(), key=lambda x: x[1]), desc="Processing episodes metadata"
     ):
@@ -878,6 +895,14 @@ def _copy_and_reindex_episodes_metadata(
             "length": src_episode["length"],
         }
         episode_dict.update(episode_meta)
+        # Preserve optional episode-level metadata and keep schema stable across shards.
+        for key in preserved_episode_metadata_keys:
+            if key in episode_dict:
+                continue
+            value = src_episode_full.get(key, None)
+            if pd.isna(value):
+                value = None
+            episode_dict[key] = value
         episode_dict.update(flatten_dict({"stats": episode_stats}))
         dst_meta._save_episode_metadata(episode_dict)
 
