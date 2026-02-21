@@ -94,6 +94,11 @@ class BiSOLeader(Teleoperator):
         self.right_arm.setup_motors()
 
     @check_if_not_connected
+    def set_manual_control(self, enabled: bool) -> None:
+        self.left_arm.set_manual_control(enabled)
+        self.right_arm.set_manual_control(enabled)
+
+    @check_if_not_connected
     def get_action(self) -> dict[str, float]:
         action_dict = {}
 
@@ -107,9 +112,23 @@ class BiSOLeader(Teleoperator):
 
         return action_dict
 
+    @check_if_not_connected
     def send_feedback(self, feedback: dict[str, float]) -> None:
-        # TODO: Implement force feedback
-        raise NotImplementedError
+        # Remove "left_" prefix
+        left_feedback = {
+            key.removeprefix("left_"): value
+            for key, value in feedback.items()
+            if key.startswith("left_")
+        }
+        # Remove "right_" prefix
+        right_feedback = {
+            key.removeprefix("right_"): value
+            for key, value in feedback.items()
+            if key.startswith("right_")
+        }
+
+        self.left_arm.send_feedback(left_feedback)
+        self.right_arm.send_feedback(right_feedback)
 
     @check_if_not_connected
     def disconnect(self) -> None:
