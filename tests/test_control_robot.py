@@ -27,6 +27,8 @@ from lerobot.datasets.lerobot_dataset import LeRobotDataset
 from lerobot.scripts.lerobot_calibrate import CalibrateConfig, calibrate
 from lerobot.scripts.lerobot_human_inloop_record import human_inloop_record
 from lerobot.scripts.lerobot_human_inloop_record import (
+    _HumanInloopFailureResetController,
+    _load_failure_reset_pose,
     _save_failure_reset_pose,
     _slow_reset_all_arms_to_pose,
 )
@@ -225,6 +227,57 @@ def test_save_and_load_failure_reset_pose(tmp_path):
         payload = json.load(f)
     assert saved_pose == {"motor_1.pos": 12.5, "motor_2.pos": -3.0}
     assert payload["joint_pos"] == {"motor_1.pos": 12.5, "motor_2.pos": -3.0}
+
+
+def test_load_failure_reset_pose_from_json(tmp_path):
+    pose_path = tmp_path / "failure_reset_pose.json"
+    payload = {
+        "robot_type": "mock_robot",
+        "joint_pos": {
+            "motor_1.pos": 12.5,
+            "motor_2.pos": -3.0,
+            "non_joint_key": 999,
+        },
+    }
+    with open(pose_path, "w") as f:
+        json.dump(payload, f)
+
+    loaded_pose = _load_failure_reset_pose(pose_path)
+    assert loaded_pose == {"motor_1.pos": 12.5, "motor_2.pos": -3.0}
+
+
+def test_human_inloop_failure_reset_controller_reuses_existing_pose(tmp_path):
+    robot_cfg = MockRobotConfig()
+    teleop_cfg = MockTeleopConfig()
+    dataset_cfg = DatasetRecordConfig(
+        repo_id=DUMMY_REPO_ID,
+        single_task="Dummy task",
+        root=tmp_path / "hil_with_policy",
+        num_episodes=1,
+        episode_time_s=0.1,
+        reset_time_s=0,
+        push_to_hub=False,
+    )
+    cfg = RecordConfig(
+        robot=robot_cfg,
+        dataset=dataset_cfg,
+        teleop=teleop_cfg,
+        play_sounds=False,
+    )
+    controller = _HumanInloopFailureResetController(cfg)
+    controller.pose_path = tmp_path / "existing_failure_reset_pose.json"
+    with open(controller.pose_path, "w") as f:
+        json.dump({"joint_pos": {"motor_1.pos": 1.0, "motor_2.pos": -2.0}}, f)
+
+    with (
+        patch("builtins.input") as mock_input,
+        patch("lerobot.scripts.lerobot_human_inloop_record._save_failure_reset_pose") as mock_save,
+    ):
+        controller.on_record_connected(robot=MagicMock(), teleop=MagicMock())
+
+    assert controller.failure_reset_pose == {"motor_1.pos": 1.0, "motor_2.pos": -2.0}
+    mock_input.assert_not_called()
+    mock_save.assert_not_called()
 
 
 def test_slow_reset_all_arms_to_pose_uses_interpolation():

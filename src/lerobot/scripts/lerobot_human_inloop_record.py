@@ -59,6 +59,19 @@ def _save_failure_reset_pose(robot: Any, pose_path: Path) -> dict[str, float]:
     return joint_pos
 
 
+def _load_failure_reset_pose(pose_path: Path) -> dict[str, float]:
+    with open(pose_path) as f:
+        payload = json.load(f)
+    joint_pos_raw = payload["joint_pos"] if isinstance(payload, dict) and "joint_pos" in payload else payload
+    if not isinstance(joint_pos_raw, dict):
+        raise ValueError(f"Invalid failure reset pose payload in {pose_path}: expected dict, got {type(joint_pos_raw)}")
+    joint_pos = {str(key): float(value) for key, value in joint_pos_raw.items() if str(key).endswith(".pos")}
+    if not joint_pos:
+        raise ValueError(f"Invalid failure reset pose payload in {pose_path}: no '.pos' joints found.")
+    logging.info("Loaded failure_reset_pose from %s", pose_path)
+    return joint_pos
+
+
 def _slow_reset_all_arms_to_pose(
     robot: Any,
     teleop: Any,
@@ -96,9 +109,13 @@ class _HumanInloopFailureResetController:
         self.failure_reset_pose: dict[str, float] | None = None
 
     def on_record_connected(self, robot: Any, teleop: Any) -> None:
+        if self.pose_path.is_file():
+            self.failure_reset_pose = _load_failure_reset_pose(self.pose_path)
+            return
+
         input(
             "Human-inloop with policy detected.\n"
-            "Please ensure ALL robot arms are at reset position, then press ENTER to capture and overwrite:\n"
+            "Please ensure ALL robot arms are at reset position, then press ENTER to capture:\n"
             f"{self.pose_path}\n"
         )
         self.failure_reset_pose = _save_failure_reset_pose(robot=robot, pose_path=self.pose_path)
