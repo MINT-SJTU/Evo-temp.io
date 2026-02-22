@@ -280,7 +280,6 @@ class RecordConfig:
         """This enables the parser to load config from the policy using `--policy.path=local/dir`"""
         return ["policy"]
 
-
 @parser.wrap()
 def record(cfg: RecordConfig) -> LeRobotDataset:
     init_logging()
@@ -406,6 +405,9 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
         robot.connect()
         if teleop is not None:
             teleop.connect()
+        on_record_connected = getattr(cfg, "_on_record_connected", None)
+        if callable(on_record_connected):
+            on_record_connected(robot, teleop)
 
         if cfg.policy_sync_to_teleop:
             if cfg.policy is None:
@@ -467,6 +469,10 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
                             dataset.num_episodes,
                             episode_success,
                         )
+
+                on_episode_outcome = getattr(cfg, "_on_record_episode_outcome", None)
+                if callable(on_episode_outcome):
+                    on_episode_outcome(robot, teleop, episode_success)
 
                 # Execute a few seconds without recording to give time to manually reset the environment
                 # Skip reset for the last episode to be recorded
