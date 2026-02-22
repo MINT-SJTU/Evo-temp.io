@@ -21,7 +21,7 @@ from typing import Any
 import draccus
 
 from lerobot.optim.optimizers import AdamWConfig, OptimizerConfig
-from lerobot.optim.schedulers import LRSchedulerConfig
+from lerobot.optim.schedulers import CosineDecayWithWarmupSchedulerConfig, LRSchedulerConfig
 
 
 @dataclass
@@ -31,6 +31,12 @@ class ValueModelConfig(draccus.ChoiceRegistry, abc.ABC):  # type: ignore[misc]
     bin_max: float = 0.0
     state_feature: str = "observation.state"
     task_index_feature: str = "task_index"
+    optimizer_lr: float = 1e-4
+    optimizer_weight_decay: float = 1e-5
+    optimizer_grad_clip_norm: float = 10.0
+    scheduler_warmup_steps: int = 1_000
+    scheduler_decay_steps: int = 30_000
+    scheduler_decay_lr: float = 1e-5
 
     @property
     def type(self) -> str:
@@ -56,12 +62,33 @@ class ValueModelConfig(draccus.ChoiceRegistry, abc.ABC):  # type: ignore[misc]
             raise ValueError("'value.state_feature' must be set.")
         if not self.task_index_feature:
             raise ValueError("'value.task_index_feature' must be set.")
+        if self.optimizer_lr <= 0:
+            raise ValueError("'value.optimizer_lr' must be > 0.")
+        if self.optimizer_weight_decay < 0:
+            raise ValueError("'value.optimizer_weight_decay' must be >= 0.")
+        if self.optimizer_grad_clip_norm < 0:
+            raise ValueError("'value.optimizer_grad_clip_norm' must be >= 0.")
+        if self.scheduler_warmup_steps < 0:
+            raise ValueError("'value.scheduler_warmup_steps' must be >= 0.")
+        if self.scheduler_decay_steps <= 0:
+            raise ValueError("'value.scheduler_decay_steps' must be > 0.")
+        if self.scheduler_decay_lr < 0:
+            raise ValueError("'value.scheduler_decay_lr' must be >= 0.")
 
     def get_optimizer_preset(self) -> OptimizerConfig:
-        return AdamWConfig(lr=1e-4, weight_decay=1e-5, grad_clip_norm=10.0)
+        return AdamWConfig(
+            lr=self.optimizer_lr,
+            weight_decay=self.optimizer_weight_decay,
+            grad_clip_norm=self.optimizer_grad_clip_norm,
+        )
 
     def get_scheduler_preset(self) -> LRSchedulerConfig | None:
-        return None
+        return CosineDecayWithWarmupSchedulerConfig(
+            peak_lr=self.optimizer_lr,
+            decay_lr=self.scheduler_decay_lr,
+            num_warmup_steps=self.scheduler_warmup_steps,
+            num_decay_steps=self.scheduler_decay_steps,
+        )
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> "ValueModelConfig":

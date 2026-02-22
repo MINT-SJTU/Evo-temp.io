@@ -398,6 +398,7 @@ def run_value_training_only_pipeline(
     start_time = time.time()
     last_loss = 0.0
     last_mae = 0.0
+    last_lr = float(optimizer.param_groups[0]["lr"])
 
     for step in range(1, cfg.train.max_steps + 1):
         raw_batch = next(train_iter)
@@ -429,15 +430,17 @@ def run_value_training_only_pipeline(
 
         last_loss = float(loss.detach().item())
         last_mae = float(value_mae.detach().item())
+        last_lr = float(optimizer.param_groups[0]["lr"])
 
         if accelerator.is_main_process and (step % cfg.train.log_freq == 0 or step == 1):
             elapsed = time.time() - start_time
             steps_per_sec = step / max(elapsed, 1e-6)
             logging.info(
-                "step=%d loss=%.6f value_mae=%.6f steps/s=%.2f",
+                "step=%d loss=%.6f value_mae=%.6f lr=%.3e steps/s=%.2f",
                 step,
                 last_loss,
                 last_mae,
+                last_lr,
                 steps_per_sec,
             )
             if wandb_run is not None:
@@ -446,6 +449,7 @@ def run_value_training_only_pipeline(
                         "step": step,
                         "loss": last_loss,
                         "value_mae": last_mae,
+                        "lr": last_lr,
                         "steps_per_sec": steps_per_sec,
                     },
                     step=step,
@@ -459,6 +463,7 @@ def run_value_training_only_pipeline(
                 "dataset_repo_id": cfg.dataset.repo_id,
                 "loss": last_loss,
                 "value_mae": last_mae,
+                "lr": last_lr,
             }
             model_to_save = accelerator.unwrap_model(model, keep_fp32_wrapper=True)
             save_value_checkpoint(
@@ -487,6 +492,7 @@ def run_value_training_only_pipeline(
             "num_episodes": int(len(shared["episode_info"])),
             "last_loss": float(last_loss),
             "last_value_mae": float(last_mae),
+            "last_lr": float(last_lr),
             "checkpoint_root": str(checkpoint_root),
             "hub_repo_id": cfg.repo_id if cfg.push_to_hub else None,
             "hub_commit_url": hub_commit_url,
