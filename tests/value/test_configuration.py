@@ -1,5 +1,6 @@
 #!/usr/bin/env python
 
+from lerobot.optim.schedulers import CosineDecayWithWarmupSchedulerConfig
 from lerobot.value.configuration import SiglipGemmaValueConfig, ValueModelConfig
 
 
@@ -22,3 +23,13 @@ def test_value_model_config_from_dict():
     assert cfg.type == "siglip_gemma_value"
     assert cfg.num_bins == 101
     assert cfg.camera_features == ["observation.images.front"]
+
+
+def test_value_model_preset_uses_cosine_decay_with_warmup():
+    cfg = SiglipGemmaValueConfig()
+    scheduler_cfg = cfg.get_scheduler_preset()
+    assert isinstance(scheduler_cfg, CosineDecayWithWarmupSchedulerConfig)
+    assert scheduler_cfg.peak_lr == cfg.optimizer_lr
+    assert scheduler_cfg.decay_lr == cfg.scheduler_decay_lr
+    assert scheduler_cfg.num_warmup_steps == cfg.scheduler_warmup_steps
+    assert scheduler_cfg.num_decay_steps == cfg.scheduler_decay_steps

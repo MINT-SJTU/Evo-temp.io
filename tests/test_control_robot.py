@@ -14,6 +14,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import json
 from unittest.mock import MagicMock, patch
 
 from collections import deque
@@ -25,6 +26,12 @@ import torch
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
 from lerobot.scripts.lerobot_calibrate import CalibrateConfig, calibrate
 from lerobot.scripts.lerobot_human_inloop_record import human_inloop_record
+from lerobot.scripts.lerobot_human_inloop_record import (
+    _HumanInloopFailureResetController,
+    _load_failure_reset_pose,
+    _save_failure_reset_pose,
+    _slow_reset_all_arms_to_pose,
+)
 from lerobot.scripts.lerobot_record import (
     ACPInferenceConfig,
     DatasetRecordConfig,
@@ -201,6 +208,101 @@ def test_record_loop_sets_leader_manual_control_during_reset():
             robot.disconnect()
 
     assert teleop.manual_control_calls == [True]
+
+
+def test_save_and_load_failure_reset_pose(tmp_path):
+    robot = MockRobot(
+        MockRobotConfig(n_motors=2, random_values=False, static_values=[12.5, -3.0])
+    )
+    robot.connect()
+    pose_path = tmp_path / "failure_reset_pose.json"
+
+    try:
+        saved_pose = _save_failure_reset_pose(robot=robot, pose_path=pose_path)
+    finally:
+        if robot.is_connected:
+            robot.disconnect()
+
+    with open(pose_path) as f:
+        payload = json.load(f)
+    assert saved_pose == {"motor_1.pos": 12.5, "motor_2.pos": -3.0}
+    assert payload["joint_pos"] == {"motor_1.pos": 12.5, "motor_2.pos": -3.0}
+
+
+def test_load_failure_reset_pose_from_json(tmp_path):
+    pose_path = tmp_path / "failure_reset_pose.json"
+    payload = {
+        "robot_type": "mock_robot",
+        "joint_pos": {
+            "motor_1.pos": 12.5,
+            "motor_2.pos": -3.0,
+            "non_joint_key": 999,
+        },
+    }
+    with open(pose_path, "w") as f:
+        json.dump(payload, f)
+
+    loaded_pose = _load_failure_reset_pose(pose_path)
+    assert loaded_pose == {"motor_1.pos": 12.5, "motor_2.pos": -3.0}
+
+
+def test_human_inloop_failure_reset_controller_reuses_existing_pose(tmp_path):
+    robot_cfg = MockRobotConfig()
+    teleop_cfg = MockTeleopConfig()
+    dataset_cfg = DatasetRecordConfig(
+        repo_id=DUMMY_REPO_ID,
+        single_task="Dummy task",
+        root=tmp_path / "hil_with_policy",
+        num_episodes=1,
+        episode_time_s=0.1,
+        reset_time_s=0,
+        push_to_hub=False,
+    )
+    cfg = RecordConfig(
+        robot=robot_cfg,
+        dataset=dataset_cfg,
+        teleop=teleop_cfg,
+        play_sounds=False,
+    )
+    controller = _HumanInloopFailureResetController(cfg)
+    controller.pose_path = tmp_path / "existing_failure_reset_pose.json"
+    with open(controller.pose_path, "w") as f:
+        json.dump({"joint_pos": {"motor_1.pos": 1.0, "motor_2.pos": -2.0}}, f)
+
+    with (
+        patch("builtins.input") as mock_input,
+        patch("lerobot.scripts.lerobot_human_inloop_record._save_failure_reset_pose") as mock_save,
+    ):
+        controller.on_record_connected(robot=MagicMock(), teleop=MagicMock())
+
+    assert controller.failure_reset_pose == {"motor_1.pos": 1.0, "motor_2.pos": -2.0}
+    mock_input.assert_not_called()
+    mock_save.assert_not_called()
+
+
+def test_slow_reset_all_arms_to_pose_uses_interpolation():
+    robot = MockRobot(MockRobotConfig(n_motors=2, random_values=False, static_values=[0.0, 0.0]))
+    teleop = MagicMock()
+    robot.connect()
+    robot.send_action = MagicMock(wraps=robot.send_action)
+    target_pose = {"motor_1.pos": 11.0, "motor_2.pos": -22.0}
+
+    try:
+        _slow_reset_all_arms_to_pose(
+            robot=robot,
+            teleop=teleop,
+            target_pose=target_pose,
+            duration_s=0.2,
+        )
+    finally:
+        if robot.is_connected:
+            robot.disconnect()
+
+    final_action = robot.send_action.call_args_list[-1].args[0]
+    assert final_action == {"motor_1.pos": 11.0, "motor_2.pos": -22.0}
+    assert robot.send_action.call_count > 1
+    teleop.set_manual_control.assert_called_once_with(False)
+    teleop.send_feedback.assert_called()
 
 
 def test_record_and_replay(tmp_path):
