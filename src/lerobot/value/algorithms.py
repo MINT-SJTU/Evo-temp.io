@@ -79,7 +79,6 @@ def compute_normalized_value_targets(
     episode_indices: np.ndarray,
     frame_indices: np.ndarray,
     episode_info: dict[int, EpisodeTargetInfo],
-    task_max_lengths: dict[int, int],
     c_fail_coef: float,
     *,
     clip_min: float = -1.0,
@@ -96,19 +95,17 @@ def compute_normalized_value_targets(
         if ep_idx not in episode_info:
             raise KeyError(f"Missing episode metadata for episode_index={ep_idx}.")
         ep = episode_info[ep_idx]
-        task_max = task_max_lengths.get(ep.task_index)
-        if task_max is None:
-            raise KeyError(f"Missing task max length for task_index={ep.task_index}.")
-        if task_max <= 0:
-            raise ValueError(f"Invalid task max length {task_max} for task_index={ep.task_index}.")
+        if ep.length <= 0:
+            raise ValueError(f"Invalid episode length {ep.length} for episode_index={ep.episode_index}.")
 
         remaining_steps = ep.length - int(frame_indices[i]) - 1
-        c_fail = float(task_max) * c_fail_coef
+        normalization_base = float(max(1, ep.length - 1))
+        c_fail = normalization_base * c_fail_coef
         g = -float(remaining_steps)
         if not ep.success:
             g -= c_fail
 
-        denom = float(task_max) + c_fail
+        denom = normalization_base + c_fail
         g_norm = g / denom
         targets[i] = np.clip(g_norm, clip_min, clip_max)
 

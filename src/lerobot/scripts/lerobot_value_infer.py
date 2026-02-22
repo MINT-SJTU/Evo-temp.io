@@ -238,7 +238,6 @@ def _prepare_shared_runtime(
         episode_indices=episode_indices,
         frame_indices=frame_indices,
         episode_info=episode_info,
-        task_max_lengths=task_max_length,
         c_fail_coef=cfg.targets.c_fail_coef,
         clip_min=bin_min,
         clip_max=bin_max,

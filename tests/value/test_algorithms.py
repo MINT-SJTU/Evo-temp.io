@@ -20,16 +20,14 @@ def test_compute_normalized_value_targets_and_rewards():
         0: EpisodeTargetInfo(episode_index=0, task_index=0, length=3, success=True),
         1: EpisodeTargetInfo(episode_index=1, task_index=0, length=2, success=False),
     }
-    task_max_lengths = {0: 3}
 
     targets = compute_normalized_value_targets(
         episode_indices=episode_indices,
         frame_indices=frame_indices,
         episode_info=episode_info,
-        task_max_lengths=task_max_lengths,
         c_fail_coef=1.0,
     )
-    expected_targets = np.array([-2 / 6, -1 / 6, 0.0, -4 / 6, -3 / 6], dtype=np.float32)
+    expected_targets = np.array([-0.5, -0.25, 0.0, -1.0, -0.5], dtype=np.float32)
     assert np.allclose(targets, expected_targets)
 
     rewards = compute_normalized_rewards_from_targets(
@@ -42,8 +40,8 @@ def test_compute_normalized_value_targets_and_rewards():
             expected_targets[0] - expected_targets[1],
             expected_targets[1] - expected_targets[2],
             0.0,
-            -1 / 6,
-            -3 / 6,
+            -0.5,
+            -0.5,
         ],
         dtype=np.float32,
     )
