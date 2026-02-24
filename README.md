@@ -1,159 +1,229 @@
-<p align="center">
-  <img alt="LeRobot, Hugging Face Robotics Library" src="./media/readme/lerobot-logo-thumbnail.png" width="100%">
-</p>
+# Evo-RL
 
-<div align="center">
+Evo-RL is a real-robot reinforcement-learning extension built on top of LeRobot.
+It keeps the LeRobot hardware/dataset/policy foundation and adds a practical pipeline for:
 
-[![Tests](https://github.com/huggingface/lerobot/actions/workflows/nightly.yml/badge.svg?branch=main)](https://github.com/huggingface/lerobot/actions/workflows/nightly.yml?query=branch%3Amain)
-[![Python versions](https://img.shields.io/pypi/pyversions/lerobot)](https://www.python.org/downloads/)
-[![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://github.com/huggingface/lerobot/blob/main/LICENSE)
-[![Status](https://img.shields.io/pypi/status/lerobot)](https://pypi.org/project/lerobot/)
-[![Version](https://img.shields.io/pypi/v/lerobot)](https://pypi.org/project/lerobot/)
-[![Contributor Covenant](https://img.shields.io/badge/Contributor%20Covenant-v2.1-ff69b4.svg)](https://github.com/huggingface/lerobot/blob/main/CODE_OF_CONDUCT.md)
-[![Discord](https://img.shields.io/badge/Discord-Join_Us-5865F2?style=flat&logo=discord&logoColor=white)](https://discord.gg/q8Dzzpym3f)
+- human-in-the-loop (HIL) data collection with intervention labels,
+- dataset quality reporting,
+- value-model training and offline inference for ACP-style frame annotation.
 
-</div>
+This README is for researchers using this repository for the first time.
 
-**LeRobot** aims to provide models, datasets, and tools for real-world robotics in PyTorch. The goal is to lower the barrier to entry so that everyone can contribute to and benefit from shared datasets and pretrained models.
+## Project Scope
 
-🤗 A hardware-agnostic, Python-native interface that standardizes control across diverse platforms, from low-cost arms (SO-100) to humanoids.
+Evo-RL focuses on closing the loop from real-world data collection to training-time conditioning:
 
-🤗 A standardized, scalable LeRobotDataset format (Parquet + MP4 or images) hosted on the Hugging Face Hub, enabling efficient storage, streaming and visualization of massive robotic datasets.
+1. Collect HIL trajectories on real robots, including episode-level success/failure labels.
+2. Inspect dataset quality and intervention statistics before training.
+3. Train a value model from recorded trajectories.
+4. Infer per-frame value/advantage/indicator labels and write them back into the dataset.
+5. Reuse those labels in `lerobot-train` with ACP prompt conditioning.
 
-🤗 State-of-the-art policies that have been shown to transfer to the real-world ready for training and deployment.
+## Main Capabilities
 
-🤗 Comprehensive support for the open-source ecosystem to democratize physical AI.
+- `lerobot-human-inloop-record`
+  - policy + teleop mirrored execution support
+  - intervention state machine with keyboard toggles
+  - per-episode success/failure labels (`episode_success`)
+  - frame-level provenance and intervention fields:
+    `complementary_info.policy_action`,
+    `complementary_info.is_intervention`,
+    `complementary_info.state`,
+    `complementary_info.collector_policy_id`
+- `lerobot-dataset-report`
+  - dataset schema and task inventory
+  - declared vs actual episode/frame counts
+  - success/failure and intervention ratios
+  - 20-bin episode length histogram
+- `lerobot-value-train`
+  - end-to-end value training pipeline from LeRobot dataset
+  - checkpoint save and optional hub upload
+- `lerobot-value-infer`
+  - loads value checkpoints and computes per-frame:
+    `complementary_info.value`,
+    `complementary_info.advantage`,
+    `complementary_info.acp_indicator`
+  - writes annotations in-place into dataset parquet/meta files
+  - optional push of annotated dataset to hub
+- ACP-aware policy training in `lerobot-train`
+  - optional prompt hook controlled by `acp.*` config
+  - reads binary indicator field and appends positive/negative tags to `task`
+
+## Installation
+
+### 1) Clone and setup environment
+
+```bash
+git clone <your-fork-url> evo-rl
+cd evo-rl
+conda activate lerobot
+```
+
+If you create a fresh env, use Python 3.10+.
+
+### 2) Install package
+
+Minimal install:
+
+```bash
+pip install -e .
+```
+
+Recommended for value pipeline (`transformers` needed):
+
+```bash
+pip install -e ".[pi]"
+```
+
+Note: current value-module runtime errors may still suggest `lerobot[pi0]`; in this branch use `lerobot[pi]`.
+
+For SO100/SO101 teleoperation hardware:
+
+```bash
+pip install -e ".[feetech]"
+```
 
 ## Quick Start
 
-LeRobot can be installed directly from PyPI.
+The commands below use existing CLI entrypoints and current argument names from this branch.
+
+### 0) Shared variables
 
 ```bash
-pip install lerobot
-lerobot-info
+export DATASET_REPO_ID=local/evo_hil_pick_place_v0
+export DATASET_ROOT=~/.cache/huggingface/lerobot
 ```
 
-> [!IMPORTANT]
-> For detailed installation guide, please see the [Installation Documentation](https://huggingface.co/docs/lerobot/installation).
-
-## Robots & Control
-
-<div align="center">
-  <img src="./media/readme/robots_control_video.webp" width="640px" alt="Reachy 2 Demo">
-</div>
-
-LeRobot provides a unified `Robot` class interface that decouples control logic from hardware specifics. It supports a wide range of robots and teleoperation devices.
-
-```python
-from lerobot.robots.myrobot import MyRobot
-
-# Connect to a robot
-robot = MyRobot(config=...)
-robot.connect()
-
-# Read observation and send action
-obs = robot.get_observation()
-action = model.select_action(obs)
-robot.send_action(action)
-```
-
-**Supported Hardware:** SO100, LeKiwi, Koch, HopeJR, OMX, EarthRover, Reachy2, Gamepads, Keyboards, Phones, OpenARM, Unitree G1.
-
-While these devices are natively integrated into the LeRobot codebase, the library is designed to be extensible. You can easily implement the Robot interface to utilize LeRobot's data collection, training, and visualization tools for your own custom robot.
-
-For detailed hardware setup guides, see the [Hardware Documentation](https://huggingface.co/docs/lerobot/integrate_hardware).
-
-## LeRobot Dataset
-
-To solve the data fragmentation problem in robotics, we utilize the **LeRobotDataset** format.
-
-- **Structure:** Synchronized MP4 videos (or images) for vision and Parquet files for state/action data.
-- **HF Hub Integration:** Explore thousands of robotics datasets on the [Hugging Face Hub](https://huggingface.co/lerobot).
-- **Tools:** Seamlessly delete episodes, split by indices/fractions, add/remove features, and merge multiple datasets.
-
-```python
-from lerobot.datasets.lerobot_dataset import LeRobotDataset
-
-# Load a dataset from the Hub
-dataset = LeRobotDataset("lerobot/aloha_mobile_cabinet")
-
-# Access data (automatically handles video decoding)
-episode_index=0
-print(f"{dataset[episode_index]['action'].shape=}\n")
-```
-
-Learn more about it in the [LeRobotDataset Documentation](https://huggingface.co/docs/lerobot/lerobot-dataset-v3)
-
-## SoTA Models
-
-LeRobot implements state-of-the-art policies in pure PyTorch, covering Imitation Learning, Reinforcement Learning, and Vision-Language-Action (VLA) models, with more coming soon. It also provides you with the tools to instrument and inspect your training process.
-
-<p align="center">
-  <img alt="Gr00t Architecture" src="./media/readme/VLA_architecture.jpg" width="640px">
-</p>
-
-Training a policy is as simple as running a script configuration:
+### 1) Human-in-loop recording (minimum runnable template)
 
 ```bash
-lerobot-train \
-  --policy=act \
-  --dataset.repo_id=lerobot/aloha_mobile_cabinet
+lerobot-human-inloop-record \
+  --robot.type=so100_follower \
+  --robot.port=/dev/ttyACM0 \
+  --robot.cameras="{front: {type: opencv, index_or_path: 0, width: 640, height: 480, fps: 30}}" \
+  --teleop.type=so100_leader \
+  --teleop.port=/dev/ttyACM1 \
+  --dataset.repo_id=${DATASET_REPO_ID} \
+  --dataset.root=${DATASET_ROOT} \
+  --dataset.single_task="Pick and place the red block" \
+  --dataset.num_episodes=20 \
+  --dataset.push_to_hub=false
 ```
 
-| Category                   | Models                                                                                                                                                                                                       |
-| -------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| **Imitation Learning**     | [ACT](./docs/source/policy_act_README.md), [Diffusion](./docs/source/policy_diffusion_README.md), [VQ-BeT](./docs/source/policy_vqbet_README.md)                                                             |
-| **Reinforcement Learning** | [HIL-SERL](./docs/source/hilserl.mdx), [TDMPC](./docs/source/policy_tdmpc_README.md) & QC-FQL (coming soon)                                                                                                  |
-| **VLAs Models**            | [Pi0Fast](./docs/source/pi0fast.mdx), [Pi0.5](./docs/source/pi05.mdx), [GR00T N1.5](./docs/source/policy_groot_README.md), [SmolVLA](./docs/source/policy_smolvla_README.md), [XVLA](./docs/source/xvla.mdx) |
-
-Similarly to the hardware, you can easily implement your own policy & leverage LeRobot's data collection, training, and visualization tools, and share your model to the HF Hub
-
-For detailed policy setup guides, see the [Policy Documentation](https://huggingface.co/docs/lerobot/bring_your_own_policies).
-
-## Inference & Evaluation
-
-Evaluate your policies in simulation or on real hardware using the unified evaluation script. LeRobot supports standard benchmarks like **LIBERO**, **MetaWorld** and more to come.
+Optional policy-assisted HIL (append these flags to the command above):
 
 ```bash
-# Evaluate a policy on the LIBERO benchmark
-lerobot-eval \
-  --policy.path=lerobot/pi0_libero_finetuned \
-  --env.type=libero \
-  --env.task=libero_object \
-  --eval.n_episodes=10
+  --policy.path=<policy_repo_or_local_path> \
+  --acp_inference.enable=true \
+  --acp_inference.use_cfg=false
 ```
 
-Learn how to implement your own simulation environment or benchmark and distribute it from the HF Hub by following the [EnvHub Documentation](https://huggingface.co/docs/lerobot/envhub)
+Default hotkeys during recording:
 
-## Resources
+- `i`: toggle intervention takeover
+- `s`: mark episode `success` and end
+- `f`: mark episode `failure` and end
 
-- **[Documentation](https://huggingface.co/docs/lerobot/index):** The complete guide to tutorials & API.
-- **[Chinese Tutorials: LeRobot+SO-ARM101中文教程-同济子豪兄](https://zihao-ai.feishu.cn/wiki/space/7589642043471924447)** Detailed doc for assembling, teleoperate, dataset, train, deploy. Verified by Seed Studio and 5 global hackathon players.
-- **[Discord](https://discord.gg/q8Dzzpym3f):** Join the `LeRobot` server to discuss with the community.
-- **[X](https://x.com/LeRobotHF):** Follow us on X to stay up-to-date with the latest developments.
-- **[Robot Learning Tutorial](https://huggingface.co/spaces/lerobot/robot-learning-tutorial):** A free, hands-on course to learn robot learning using LeRobot.
+### 2) Dataset report
 
-## Citation
-
-If you use LeRobot in your research, please cite:
-
-```bibtex
-@misc{cadene2024lerobot,
-    author = {Cadene, Remi and Alibert, Simon and Soare, Alexander and Gallouedec, Quentin and Zouitine, Adil and Palma, Steven and Kooijmans, Pepijn and Aractingi, Michel and Shukor, Mustafa and Aubakirova, Dana and Russi, Martino and Capuano, Francesco and Pascal, Caroline and Choghari, Jade and Moss, Jess and Wolf, Thomas},
-    title = {LeRobot: State-of-the-art Machine Learning for Real-World Robotics in Pytorch},
-    howpublished = "\url{https://github.com/huggingface/lerobot}",
-    year = {2024}
-}
+```bash
+lerobot-dataset-report \
+  --dataset ${DATASET_REPO_ID} \
+  --root ${DATASET_ROOT}
 ```
 
-## Contribute
+JSON output:
 
-We welcome contributions from everyone in the community! To get started, please read our [CONTRIBUTING.md](./CONTRIBUTING.md) guide. Whether you're adding a new feature, improving documentation, or fixing a bug, your help and feedback are invaluable. We're incredibly excited about the future of open-source robotics and can't wait to work with you on what's next—thank you for your support!
+```bash
+lerobot-dataset-report \
+  --dataset ${DATASET_REPO_ID} \
+  --root ${DATASET_ROOT} \
+  --json
+```
 
-<p align="center">
-  <img alt="SO101 Video" src="./media/readme/so100_video.webp" width="640px">
-</p>
+### 3) Value training
 
-<div align="center">
-<sub>Built by the <a href="https://huggingface.co/lerobot">LeRobot</a> team at <a href="https://huggingface.co">Hugging Face</a> with ❤️</sub>
-</div>
+```bash
+lerobot-value-train \
+  --dataset.repo_id=${DATASET_REPO_ID} \
+  --dataset.root=${DATASET_ROOT} \
+  --dataset.download_videos=true \
+  --train.max_steps=2000 \
+  --train.batch_size=16 \
+  --output_dir=outputs/evo_value_demo
+```
+
+### 4) Value inference (write annotations into dataset)
+
+```bash
+lerobot-value-infer \
+  --dataset.repo_id=${DATASET_REPO_ID} \
+  --dataset.root=${DATASET_ROOT} \
+  --inference.checkpoint_root=outputs/evo_value_demo/value/checkpoints \
+  --inference.checkpoint_ref=last \
+  --runtime.batch_size=64 \
+  --push_to_hub=false
+```
+
+After inference, dataset frames contain:
+
+- `complementary_info.value`
+- `complementary_info.advantage`
+- `complementary_info.acp_indicator`
+
+Optional overlay video export:
+
+```bash
+lerobot-value-episode-viz \
+  --repo-id ${DATASET_REPO_ID} \
+  --root ${DATASET_ROOT} \
+  --episodes all \
+  --output-dir outputs/value_vis
+```
+
+`lerobot-value-episode-viz` requires the three annotation fields above to exist.
+If they are missing, run `lerobot-value-infer` first.
+
+## Repository Layout
+
+Key Evo-RL additions are concentrated in:
+
+- `src/lerobot/scripts/lerobot_human_inloop_record.py`
+- `src/lerobot/scripts/recording_hil.py`
+- `src/lerobot/scripts/recording_loop.py`
+- `src/lerobot/scripts/lerobot_dataset_report.py`
+- `src/lerobot/scripts/lerobot_value_train.py`
+- `src/lerobot/scripts/lerobot_value_infer.py`
+- `src/lerobot/scripts/lerobot_value_episode_viz.py`
+- `src/lerobot/value/` (value model/config/io/preprocess/telemetry)
+- `src/lerobot/rl/acp_hook.py`
+- `src/lerobot/rl/acp_dataset_stats.py`
+
+Core LeRobot base remains in:
+
+- `src/lerobot/robots/`
+- `src/lerobot/teleoperators/`
+- `src/lerobot/datasets/`
+- `src/lerobot/policies/`
+- `src/lerobot/scripts/lerobot_train.py`
+
+## Relationship to Upstream LeRobot
+
+- This repository is a LeRobot-derived branch, not a clean-room rewrite.
+- Package name and CLI namespace remain `lerobot` / `lerobot-*`.
+- Existing LeRobot workflows still apply; Evo-RL extends them with HIL annotation and value/ACP tooling.
+- Upstream sync is expected; behavior can change after future rebases/merges.
+
+## Known Limitations
+
+- Value pipeline currently supports `SiglipGemmaValueConfig` only.
+- Value preprocessing/model loading depends on `transformers`; missing dependency causes runtime import errors.
+- Value inference updates dataset parquet/meta files in place. Back up datasets before large runs.
+- `lerobot-human-inloop-record` requires teleop config; ACP inference options require a policy.
+- Headless environments may not support keyboard listener hotkeys.
+- ACP hook expects binary integer indicators (`0/1`) in the configured indicator field.
+- Resuming old policy+teleop datasets (created before `complementary_info.*` fields were introduced) can fail metadata compatibility checks.
+
+## License
+
+Apache-2.0. See `LICENSE`.

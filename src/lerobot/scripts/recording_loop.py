@@ -16,7 +16,8 @@
 
 import logging
 import time
-from typing import Any
+from collections.abc import Callable
+from typing import Any, TypeVar
 
 import numpy as np
 
@@ -49,6 +50,8 @@ from lerobot.utils.recording_annotations import resolve_collector_policy_id
 from lerobot.utils.robot_utils import precise_sleep
 from lerobot.utils.utils import get_safe_torch_device
 from lerobot.utils.visualization_utils import log_rerun_data
+
+T = TypeVar("T")
 
 
 """ --------------- record_loop() data flow --------------------------
@@ -109,6 +112,8 @@ def record_loop(
     collector_policy_id_policy: str = "policy",
     collector_policy_id_human: str = "human",
     acp_inference: ACPInferenceConfig | None = None,
+    communication_retry_timeout_s: float = 2.0,
+    communication_retry_interval_s: float = 0.1,
 ):
     if acp_inference is None:
         acp_inference = ACPInferenceConfig()
@@ -193,6 +198,46 @@ def record_loop(
         # Start in S0: policy drives both arms, teleop arm should accept feedback commands.
         set_teleop_manual_control(False)
 
+    def run_with_connection_retry(action_name: str, fn: Callable[[], T]) -> T:
+        timeout_s = max(communication_retry_timeout_s, 0.0)
+        interval_s = max(communication_retry_interval_s, 0.0)
+        deadline_t = time.perf_counter() + timeout_s
+        attempts = 0
+        first_error: ConnectionError | None = None
+
+        while True:
+            attempts += 1
+            try:
+                result = fn()
+                if attempts > 1:
+                    elapsed_s = timeout_s - max(deadline_t - time.perf_counter(), 0.0)
+                    logging.warning(
+                        "%s recovered after %d retries in %.2fs.",
+                        action_name,
+                        attempts - 1,
+                        elapsed_s,
+                    )
+                return result
+            except ConnectionError as error:
+                if first_error is None:
+                    first_error = error
+                    logging.warning(
+                        "%s failed with transient communication error; retrying for up to %.2fs (%s)",
+                        action_name,
+                        timeout_s,
+                        error,
+                    )
+
+                if timeout_s <= 0.0:
+                    raise
+
+                remaining_s = deadline_t - time.perf_counter()
+                if remaining_s <= 0.0:
+                    raise
+
+                sleep_s = interval_s if interval_s > 0.0 else remaining_s
+                time.sleep(min(sleep_s, remaining_s))
+
     timestamp = 0
     start_episode_t = time.perf_counter()
     while timestamp < control_time_s:
@@ -255,13 +300,13 @@ def record_loop(
                 act_processed_policy = make_robot_action(policy_action, dataset.features)
 
         if isinstance(teleop, Teleoperator):
-            act = teleop.get_action()
+            act = run_with_connection_retry("teleop.get_action", teleop.get_action)
 
             # Applies a pipeline to the raw teleop action, default is IdentityProcessor
             act_processed_teleop = teleop_action_processor((act, obs))
 
         elif isinstance(teleop, list):
-            arm_action = teleop_arm.get_action()
+            arm_action = run_with_connection_retry("teleop_arm.get_action", teleop_arm.get_action)
             arm_action = {f"arm_{k}": v for k, v in arm_action.items()}
             keyboard_action = teleop_keyboard.get_action()
             base_action = robot._from_keyboard_to_base_action(keyboard_action)
@@ -320,9 +365,15 @@ def record_loop(
         # TODO(steven, pepijn, adil): we should use a pipeline step to clip the action, so the sent action is the action that we input to the robot.
         selected_from_policy = act_processed_policy is not None and action_values is act_processed_policy
         if policy_sync_executor is not None and selected_from_policy:
-            _sent_action = policy_sync_executor.send_action(robot_action_to_send)
+            _sent_action = run_with_connection_retry(
+                "policy_sync_executor.send_action",
+                lambda: policy_sync_executor.send_action(robot_action_to_send),
+            )
         else:
-            _sent_action = robot.send_action(robot_action_to_send)
+            _sent_action = run_with_connection_retry(
+                "robot.send_action",
+                lambda: robot.send_action(robot_action_to_send),
+            )
 
         # Write to dataset
         if dataset is not None:

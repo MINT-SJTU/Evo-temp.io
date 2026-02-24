@@ -230,6 +230,10 @@ class RecordConfig:
     collector_policy_id_human: str = "human"
     # ACP inference controls for policy-driven recording.
     acp_inference: ACPInferenceConfig = field(default_factory=ACPInferenceConfig)
+    # Retry timeout for transient communication errors (seconds). Set to 0 to fail immediately.
+    communication_retry_timeout_s: float = 2.0
+    # Sleep interval between communication retries (seconds).
+    communication_retry_interval_s: float = 0.1
 
     def __post_init__(self):
         # HACK: We parse again the cli args here to get the pretrained path if there was one.
@@ -274,6 +278,10 @@ class RecordConfig:
             raise ValueError("`acp_inference.use_cfg=true` requires `acp_inference.enable=true`.")
         if self.acp_inference.cfg_beta < 0:
             raise ValueError("`acp_inference.cfg_beta` must be >= 0.")
+        if self.communication_retry_timeout_s < 0:
+            raise ValueError("`communication_retry_timeout_s` must be >= 0.")
+        if self.communication_retry_interval_s <= 0:
+            raise ValueError("`communication_retry_interval_s` must be > 0.")
 
     @classmethod
     def __get_path_fields__(cls) -> list[str]:
@@ -454,6 +462,8 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
                     collector_policy_id_policy=collector_policy_id_policy,
                     collector_policy_id_human=collector_policy_id_human,
                     acp_inference=cfg.acp_inference,
+                    communication_retry_timeout_s=cfg.communication_retry_timeout_s,
+                    communication_retry_interval_s=cfg.communication_retry_interval_s,
                 )
 
                 episode_success = None
@@ -501,6 +511,8 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
                         collector_policy_id_policy=collector_policy_id_policy,
                         collector_policy_id_human=collector_policy_id_human,
                         acp_inference=cfg.acp_inference,
+                        communication_retry_timeout_s=cfg.communication_retry_timeout_s,
+                        communication_retry_interval_s=cfg.communication_retry_interval_s,
                     )
 
                 if events["rerecord_episode"]:
