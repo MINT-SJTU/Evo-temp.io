@@ -88,6 +88,48 @@ def _flatten_episode_tasks(task_value: Any) -> list[str]:
     return [str(task_value)]
 
 
+def _build_episode_length_histogram(lengths: list[float], bins: int = 20) -> list[dict[str, float | int]]:
+    if bins <= 0:
+        raise ValueError(f"bins must be > 0, got {bins}")
+    if not lengths:
+        return [{"start": 0.0, "end": 0.0, "count": 0} for _ in range(bins)]
+
+    min_len = float(min(lengths))
+    max_len = float(max(lengths))
+    span = max_len - min_len
+
+    histogram = []
+    if span == 0.0:
+        histogram.append({"start": min_len, "end": max_len, "count": len(lengths)})
+        histogram.extend({"start": min_len, "end": max_len, "count": 0} for _ in range(bins - 1))
+        return histogram
+
+    bin_width = span / bins
+    for i in range(bins):
+        start = min_len + i * bin_width
+        end = min_len + (i + 1) * bin_width if i < bins - 1 else max_len
+        histogram.append({"start": start, "end": end, "count": 0})
+
+    for length in lengths:
+        idx = min(int((float(length) - min_len) / bin_width), bins - 1)
+        histogram[idx]["count"] = int(histogram[idx]["count"]) + 1
+
+    return histogram
+
+
+def _format_ascii_histogram(histogram: list[dict[str, float | int]], bar_width: int = 40) -> list[str]:
+    max_count = max((bin_info["count"] for bin_info in histogram), default=0)
+    lines: list[str] = []
+    for bin_info in histogram:
+        count = int(bin_info["count"])
+        start = float(bin_info["start"])
+        end = float(bin_info["end"])
+        filled = 0 if max_count == 0 else int(round((count / max_count) * bar_width))
+        bar = "#" * filled
+        lines.append(f"- [{start:>7.2f}s, {end:>7.2f}s] | {count:>5} | {bar}")
+    return lines
+
+
 def build_report(dataset_root: Path) -> dict[str, Any]:
     info = load_info(dataset_root)
     episodes_ds = load_episodes(dataset_root)
@@ -146,9 +188,15 @@ def build_report(dataset_root: Path) -> dict[str, Any]:
             }
         )
 
-    length_mean = float(episodes_df["length"].mean()) if "length" in episodes_df and actual_episode_count > 0 else 0.0
-    length_min = int(episodes_df["length"].min()) if "length" in episodes_df and actual_episode_count > 0 else 0
-    length_max = int(episodes_df["length"].max()) if "length" in episodes_df and actual_episode_count > 0 else 0
+    fps = float(info.get("fps", 0) or 0)
+    episode_lengths_frames = (
+        episodes_df["length"].astype(int).tolist() if "length" in episodes_df and actual_episode_count > 0 else []
+    )
+    episode_lengths_seconds = [frames / fps for frames in episode_lengths_frames] if fps > 0 else []
+    length_mean = float(sum(episode_lengths_seconds) / len(episode_lengths_seconds)) if episode_lengths_seconds else 0.0
+    length_min = float(min(episode_lengths_seconds)) if episode_lengths_seconds else 0.0
+    length_max = float(max(episode_lengths_seconds)) if episode_lengths_seconds else 0.0
+    length_histogram = _build_episode_length_histogram(episode_lengths_seconds, bins=20)
 
     return {
         "dataset_root": str(dataset_root),
@@ -172,9 +220,11 @@ def build_report(dataset_root: Path) -> dict[str, Any]:
             "actual_episode_count": actual_episode_count,
             "actual_frame_count": actual_frame_count,
             "episode_length": {
+                "unit": "seconds",
                 "mean": length_mean,
                 "min": length_min,
                 "max": length_max,
+                "histogram_bins": length_histogram,
             },
         },
         "success_metrics": {
@@ -219,9 +269,11 @@ def format_text_report(report: dict[str, Any]) -> str:
         f"- actual totals: episodes={quality['actual_episode_count']}, frames={quality['actual_frame_count']}"
     )
     lines.append(
-        f"- episode length (frames): mean={quality['episode_length']['mean']:.2f}, "
-        f"min={quality['episode_length']['min']}, max={quality['episode_length']['max']}"
+        f"- episode length ({quality['episode_length']['unit']}): mean={quality['episode_length']['mean']:.2f}, "
+        f"min={quality['episode_length']['min']:.2f}, max={quality['episode_length']['max']:.2f}"
     )
+    lines.append("- episode length histogram (20 bins, terminal view):")
+    lines.extend(_format_ascii_histogram(quality["episode_length"]["histogram_bins"]))
     lines.append("")
 
     success = report["success_metrics"]
