@@ -28,7 +28,7 @@ class SOLeaderConfig:
     port: str
 
     # Whether to use degrees for angles
-    use_degrees: bool = True
+    use_degrees: bool = False
 
 
 @TeleoperatorConfig.register_subclass("so101_leader")

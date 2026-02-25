@@ -21,7 +21,6 @@ from lerobot.scripts.lerobot_edit_dataset import (
     ConvertImageToVideoConfig,
     DeleteEpisodesConfig,
     EditDatasetConfig,
-    InfoConfig,
     MergeConfig,
     ModifyTasksConfig,
     OperationConfig,
@@ -47,7 +46,6 @@ class TestOperationTypeParsing:
             ("remove_feature", RemoveFeatureConfig),
             ("modify_tasks", ModifyTasksConfig),
             ("convert_image_to_video", ConvertImageToVideoConfig),
-            ("info", InfoConfig),
         ],
     )
     def test_operation_type_resolves_correct_class(self, type_name, expected_cls):
@@ -65,7 +63,6 @@ class TestOperationTypeParsing:
             ("remove_feature", RemoveFeatureConfig),
             ("modify_tasks", ModifyTasksConfig),
             ("convert_image_to_video", ConvertImageToVideoConfig),
-            ("info", InfoConfig),
         ],
     )
     def test_get_choice_name_roundtrips(self, type_name, expected_cls):
