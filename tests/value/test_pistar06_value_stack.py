@@ -4,7 +4,6 @@ from types import SimpleNamespace
 
 import pytest
 import torch
-import torch.nn.functional as F  # noqa: N812
 from torch import nn
 
 import lerobot.processor.tokenizer_processor as tokenizer_processor
@@ -42,28 +41,13 @@ class _DummyTokenizer:
 
 
 class _DummyImageProcessor:
+    size = {"height": 32, "width": 32}
+    image_mean = [0.5, 0.5, 0.5]
+    image_std = [0.5, 0.5, 0.5]
+
     @classmethod
     def from_pretrained(cls, *args, **kwargs):
         return cls()
-
-    def __call__(self, images, return_tensors, do_rescale, size=None):
-        del return_tensors, do_rescale
-        if size is None:
-            height, width = 32, 32
-        else:
-            height, width = int(size["height"]), int(size["width"])
-
-        out = []
-        for image in images:
-            img = image
-            if img.ndim != 3:
-                raise ValueError(f"Expected rank-3 image tensor, got {tuple(img.shape)}.")
-            if img.shape[0] not in {1, 3}:
-                img = img.permute(2, 0, 1)
-            img = img.to(dtype=torch.float32)
-            img = F.interpolate(img.unsqueeze(0), size=(height, width), mode="bilinear", align_corners=False)
-            out.append(img.squeeze(0))
-        return {"pixel_values": torch.stack(out, dim=0)}
 
 
 class _DummyVisionModel(nn.Module):
@@ -134,7 +118,7 @@ class _DummyAutoConfig:
 @pytest.fixture
 def hf_stubs(monkeypatch):
     monkeypatch.setattr(tokenizer_processor, "AutoTokenizer", _DummyTokenizer)
-    monkeypatch.setattr(pistar06_processor, "AutoImageProcessor", _DummyImageProcessor)
+    monkeypatch.setattr(pistar06_modeling, "AutoImageProcessor", _DummyImageProcessor)
     monkeypatch.setattr(pistar06_modeling, "AutoModel", _DummyAutoModel)
     monkeypatch.setattr(pistar06_modeling, "AutoModelForCausalLM", _DummyAutoModelForCausalLM)
     monkeypatch.setattr(pistar06_modeling, "AutoConfig", _DummyAutoConfig)
@@ -158,7 +142,7 @@ def test_pistar06_processor_pads_missing_cameras_and_tokenizes(hf_stubs):
 
     assert processed[OBS_LANGUAGE_TOKENS].shape == (2, 16)
     assert processed[OBS_LANGUAGE_ATTENTION_MASK].dtype == torch.bool
-    assert processed[PISTAR06_IMAGES_KEY].shape == (2, 2, 3, 32, 32)
+    assert processed[PISTAR06_IMAGES_KEY].shape == (2, 2, 3, 48, 40)
     assert torch.equal(processed[PISTAR06_IMAGE_MASK_KEY][:, 0], torch.ones(2, dtype=torch.bool))
     assert torch.equal(processed[PISTAR06_IMAGE_MASK_KEY][:, 1], torch.zeros(2, dtype=torch.bool))
 

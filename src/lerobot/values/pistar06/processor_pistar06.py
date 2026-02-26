@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 import numpy as np
 import torch
@@ -30,13 +30,7 @@ from lerobot.utils.constants import (
     POLICY_POSTPROCESSOR_DEFAULT_NAME,
     POLICY_PREPROCESSOR_DEFAULT_NAME,
 )
-from lerobot.utils.import_utils import _transformers_available
 from lerobot.values.pistar06.configuration_pistar06 import Pistar06Config
-
-if TYPE_CHECKING or _transformers_available:
-    from transformers import AutoImageProcessor
-else:
-    AutoImageProcessor = None
 
 PISTAR06_IMAGES_KEY = "observation.pistar06.images"
 PISTAR06_IMAGE_MASK_KEY = "observation.pistar06.image_attention_mask"
@@ -137,24 +131,10 @@ class Pistar06PrepareTaskPromptProcessorStep(ProcessorStep):
 @ProcessorStepRegistry.register(name="pistar06_prepare_images")
 @dataclass
 class Pistar06PrepareImagesProcessorStep(ProcessorStep):
-    vision_repo_id: str
-    vision_revision: str | None
     camera_features: list[str]
-
-    def __post_init__(self):
-        if AutoImageProcessor is None:
-            raise ImportError("transformers is not installed. Install with `pip install 'lerobot[pi0]'`.")
-
-        self.image_processor = AutoImageProcessor.from_pretrained(
-            self.vision_repo_id,
-            revision=self.vision_revision,
-            use_fast=True,
-        )
 
     def get_config(self) -> dict[str, Any]:
         return {
-            "vision_repo_id": self.vision_repo_id,
-            "vision_revision": self.vision_revision,
             "camera_features": self.camera_features,
         }
 
@@ -173,16 +153,7 @@ class Pistar06PrepareImagesProcessorStep(ProcessorStep):
         )
 
     def _process_camera_batch(self, img_batch: Tensor) -> Tensor:
-        img_batch = self._to_bchw(img_batch).detach().to(dtype=torch.float32, device="cpu")
-        do_rescale = not bool(torch.max(img_batch) <= 1.0 and torch.min(img_batch) >= 0.0)
-        image_list = [img_batch[i] for i in range(img_batch.shape[0])]
-
-        processor_kwargs: dict[str, Any] = {"return_tensors": "pt", "do_rescale": do_rescale}
-        processed = self.image_processor(images=image_list, **processor_kwargs)
-        pixel_values = processed["pixel_values"]
-        if not isinstance(pixel_values, torch.Tensor):
-            raise TypeError("Image processor did not return tensor 'pixel_values'.")
-        return pixel_values
+        return self._to_bchw(img_batch).detach().to(dtype=torch.float32)
 
     def _prepare_images(self, observation: dict[str, Any]) -> tuple[Tensor, Tensor]:
         present_img_keys = [key for key in self.camera_features if key in observation]
@@ -203,6 +174,11 @@ class Pistar06PrepareImagesProcessorStep(ProcessorStep):
                 if img.shape[0] != bsize:
                     raise ValueError(
                         f"Mismatched batch size across cameras. Camera '{key}' has {img.shape[0]}, expected {bsize}."
+                    )
+                if img.shape[1:] != reference_img.shape[1:]:
+                    raise ValueError(
+                        "Camera tensors must share the same [C,H,W] shape before model preprocessing. "
+                        f"Camera '{key}' has {tuple(img.shape[1:])}, expected {tuple(reference_img.shape[1:])}."
                     )
                 image_tensors.append(img)
                 image_masks.append(torch.ones(bsize, dtype=torch.bool))
@@ -265,11 +241,7 @@ def make_pistar06_pre_post_processors(
             padding="max_length",
             truncation=True,
         ),
-        Pistar06PrepareImagesProcessorStep(
-            vision_repo_id=config.vision_repo_id,
-            vision_revision=config.vision_revision,
-            camera_features=camera_features,
-        ),
+        Pistar06PrepareImagesProcessorStep(camera_features=camera_features),
         DeviceProcessorStep(device=config.device),
     ]
 

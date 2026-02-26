@@ -19,9 +19,10 @@ from lerobot.values.pistar06.configuration_pistar06 import Pistar06Config
 from lerobot.values.pistar06.processor_pistar06 import PISTAR06_IMAGE_MASK_KEY, PISTAR06_IMAGES_KEY
 
 if TYPE_CHECKING or _transformers_available:
-    from transformers import AutoConfig, AutoModel, AutoModelForCausalLM
+    from transformers import AutoConfig, AutoImageProcessor, AutoModel, AutoModelForCausalLM
 else:
     AutoConfig = None
+    AutoImageProcessor = None
     AutoModel = None
     AutoModelForCausalLM = None
 
@@ -173,6 +174,33 @@ def _validate_loading_info(repo_id: str, model_label: str, loading_info: dict[st
     )
 
 
+def _resolve_image_size(image_processor: Any) -> tuple[int, int]:
+    size = getattr(image_processor, "size", None)
+    if isinstance(size, dict):
+        if "height" in size and "width" in size:
+            return int(size["height"]), int(size["width"])
+        if "shortest_edge" in size:
+            edge = int(size["shortest_edge"])
+            return edge, edge
+    if isinstance(size, int):
+        return int(size), int(size)
+    return 384, 384
+
+
+def _resolve_norm_stats(image_processor: Any) -> tuple[tuple[float, float, float], tuple[float, float, float]]:
+    mean_raw = getattr(image_processor, "image_mean", [0.5, 0.5, 0.5])
+    std_raw = getattr(image_processor, "image_std", [0.5, 0.5, 0.5])
+    if len(mean_raw) != 3 or len(std_raw) != 3:
+        raise ValueError(
+            f"Expected RGB normalization stats of len=3, got mean={mean_raw} std={std_raw}."
+        )
+    mean = (float(mean_raw[0]), float(mean_raw[1]), float(mean_raw[2]))
+    std = (float(std_raw[0]), float(std_raw[1]), float(std_raw[2]))
+    if any(v <= 0 for v in std):
+        raise ValueError(f"Invalid image std values: {std}.")
+    return mean, std
+
+
 def _load_language_model(
     repo_id: str,
     revision: str | None,
@@ -216,7 +244,7 @@ def _load_language_model(
 class Pistar06Model(nn.Module):
     def __init__(self, cfg: Pistar06Config):
         super().__init__()
-        if AutoModel is None:
+        if AutoModel is None or AutoImageProcessor is None:
             raise ImportError("transformers is not installed. Install with `pip install 'lerobot[pi0]'`.")
 
         self.cfg = cfg
@@ -232,6 +260,26 @@ class Pistar06Model(nn.Module):
             revision=cfg.language_revision,
             dtype=self.model_dtype,
         )
+
+        image_processor = AutoImageProcessor.from_pretrained(
+            cfg.vision_repo_id,
+            revision=cfg.vision_revision,
+            use_fast=True,
+        )
+        image_height, image_width = _resolve_image_size(image_processor)
+        image_mean, image_std = _resolve_norm_stats(image_processor)
+        self.image_resolution = (image_height, image_width)
+        self.register_buffer(
+            "image_mean",
+            torch.tensor(image_mean, dtype=torch.float32).view(1, 1, 3, 1, 1),
+            persistent=False,
+        )
+        self.register_buffer(
+            "image_std",
+            torch.tensor(image_std, dtype=torch.float32).view(1, 1, 3, 1, 1),
+            persistent=False,
+        )
+
         vision_feature_size = _extract_vision_feature_size(self.vision_encoder)
         language_hidden_size = _extract_hidden_size(self.language_model)
 
@@ -287,6 +335,51 @@ class Pistar06Model(nn.Module):
         denom = token_mask.sum(dim=1).clamp_min(1.0)
         return (hidden * token_mask).sum(dim=1) / denom
 
+    def _preprocess_images(self, images: Tensor, image_attention_mask: Tensor) -> Tensor:
+        if images.ndim != 5:
+            raise ValueError(f"'images' must have shape [B,N,C,H,W], got {tuple(images.shape)}.")
+        if image_attention_mask.ndim != 2:
+            raise ValueError(
+                f"'image_attention_mask' must have shape [B,N], got {tuple(image_attention_mask.shape)}."
+            )
+
+        bsize, num_cameras = images.shape[:2]
+        if image_attention_mask.shape[0] != bsize or image_attention_mask.shape[1] != num_cameras:
+            raise ValueError("Batch shape mismatch between images and image_attention_mask.")
+
+        if images.dtype == torch.uint8:
+            images = images.to(dtype=torch.float32) / 255.0
+        else:
+            images = images.to(dtype=torch.float32)
+            if bool(torch.max(images) > 1.0) or bool(torch.min(images) < 0.0):
+                images = (images / 255.0).clamp(0.0, 1.0)
+
+        flat_images = images.view(bsize * num_cameras, *images.shape[2:])
+        if flat_images.shape[-2:] != self.image_resolution:
+            flat_images = F.interpolate(
+                flat_images,
+                size=self.image_resolution,
+                mode="bilinear",
+                align_corners=False,
+            )
+
+        mean = self.image_mean.to(device=flat_images.device, dtype=flat_images.dtype).view(1, 3, 1, 1)
+        std = self.image_std.to(device=flat_images.device, dtype=flat_images.dtype).view(1, 3, 1, 1)
+        flat_images = (flat_images - mean) / std
+        flat_images = flat_images.view(
+            bsize,
+            num_cameras,
+            flat_images.shape[1],
+            flat_images.shape[2],
+            flat_images.shape[3],
+        )
+
+        camera_mask = image_attention_mask.to(device=flat_images.device, dtype=flat_images.dtype).view(
+            bsize, num_cameras, 1, 1, 1
+        )
+        flat_images = flat_images * camera_mask
+        return flat_images
+
     def forward(
         self,
         input_ids: Tensor,
@@ -320,8 +413,10 @@ class Pistar06Model(nn.Module):
         if not torch.all(language_mask.any(dim=1)):
             raise ValueError("Each sample must have at least one valid language token.")
 
-        num_cameras = images.shape[1]
-        flat_images = images.reshape(bsize * num_cameras, *images.shape[2:])
+        processed_images = self._preprocess_images(images, image_attention_mask)
+        num_cameras = processed_images.shape[1]
+        flat_images = processed_images.reshape(bsize * num_cameras, *processed_images.shape[2:])
+        flat_images = flat_images.to(dtype=self.model_dtype)
 
         image_context = torch.no_grad() if self.cfg.freeze_vision_encoder else nullcontext()
         with image_context:
