@@ -65,7 +65,7 @@ from lerobot.value.telemetry import (
 def _create_accelerator(cfg: ValueTrainPipelineConfig, accelerator: Accelerator | None) -> Accelerator:
     if accelerator is not None:
         return accelerator
-    ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=True)
+    ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=False)
     force_cpu = cfg.train.device == "cpu"
     return Accelerator(step_scheduler_with_optimizer=False, kwargs_handlers=[ddp_kwargs], cpu=force_cpu)
 

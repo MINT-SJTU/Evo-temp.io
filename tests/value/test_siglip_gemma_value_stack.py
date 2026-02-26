@@ -94,10 +94,21 @@ class _DummyLanguageModel(nn.Module):
 class _DummyAutoModel:
     @classmethod
     def from_pretrained(cls, repo_id, **kwargs):
-        del kwargs
+        output_loading_info = bool(kwargs.pop("output_loading_info", False))
         if "siglip" in repo_id.lower():
-            return _DummyVisionModel()
-        return _DummyLanguageModel()
+            model = _DummyVisionModel()
+        else:
+            model = _DummyLanguageModel()
+        if output_loading_info:
+            return model, {"missing_keys": [], "unexpected_keys": [], "mismatched_keys": []}
+        return model
+
+
+class _DummyAutoConfig:
+    @classmethod
+    def from_pretrained(cls, *args, **kwargs):
+        del args, kwargs
+        return SimpleNamespace(architectures=[])
 
 
 @pytest.fixture
@@ -105,6 +116,7 @@ def hf_stubs(monkeypatch):
     monkeypatch.setattr(value_preprocess, "AutoTokenizer", _DummyTokenizer)
     monkeypatch.setattr(value_preprocess, "AutoImageProcessor", _DummyImageProcessor)
     monkeypatch.setattr(value_modeling, "AutoModel", _DummyAutoModel)
+    monkeypatch.setattr(value_modeling, "AutoConfig", _DummyAutoConfig)
 
 
 def test_siglip_gemma_preprocessor_pads_missing_cameras_and_tokenizes(hf_stubs):
@@ -129,6 +141,61 @@ def test_siglip_gemma_preprocessor_pads_missing_cameras_and_tokenizes(hf_stubs):
     assert processed["images"].shape == (2, 2, 3, 32, 32)
     assert torch.equal(processed["image_attention_mask"][:, 0], torch.ones(2, dtype=torch.bool))
     assert torch.equal(processed["image_attention_mask"][:, 1], torch.zeros(2, dtype=torch.bool))
+
+
+def test_siglip_gemma_preprocessor_vectorizes_camera_processing(hf_stubs, monkeypatch):
+    del hf_stubs
+    call_count = {"n": 0}
+
+    class _CountingImageProcessor(_DummyImageProcessor):
+        def __call__(self, images, return_tensors, do_rescale, size=None):
+            call_count["n"] += 1
+            return super().__call__(images, return_tensors=return_tensors, do_rescale=do_rescale, size=size)
+
+    monkeypatch.setattr(value_preprocess, "AutoImageProcessor", _CountingImageProcessor)
+    cfg = SiglipGemmaValueConfig(
+        camera_features=["observation.images.front", "observation.images.wrist"],
+        tokenizer_max_length=16,
+    )
+    preprocessor = SiglipGemmaValuePreprocessor(
+        cfg=cfg,
+        dataset_camera_features=["observation.images.front", "observation.images.wrist"],
+    )
+
+    raw_batch = {
+        "task": ["pick bottle", "place bottle"],
+        "observation.images.front": torch.rand(2, 3, 48, 40),
+        "observation.images.wrist": torch.rand(2, 3, 48, 40),
+    }
+    processed = preprocessor(raw_batch, device=torch.device("cpu"))
+
+    assert processed["images"].shape == (2, 2, 3, 32, 32)
+    assert call_count["n"] == 1
+
+
+def test_siglip_gemma_preprocessor_vectorized_output_matches_per_camera_baseline(hf_stubs):
+    del hf_stubs
+    cfg = SiglipGemmaValueConfig(
+        camera_features=["observation.images.front", "observation.images.wrist"],
+        tokenizer_max_length=16,
+    )
+    preprocessor = SiglipGemmaValuePreprocessor(
+        cfg=cfg,
+        dataset_camera_features=["observation.images.front", "observation.images.wrist"],
+    )
+    raw_batch = {
+        "task": ["pick bottle", "place bottle"],
+        "observation.images.front": torch.randint(0, 255, (2, 3, 48, 40), dtype=torch.uint8),
+        "observation.images.wrist": torch.randint(0, 255, (2, 3, 48, 40), dtype=torch.uint8),
+    }
+    processed = preprocessor(raw_batch, device=torch.device("cpu"))
+
+    front = preprocessor._process_camera_batch(raw_batch["observation.images.front"], device=torch.device("cpu"))
+    wrist = preprocessor._process_camera_batch(raw_batch["observation.images.wrist"], device=torch.device("cpu"))
+    expected_images = torch.stack([front, wrist], dim=1)
+
+    assert torch.allclose(processed["images"], expected_images, atol=1e-6, rtol=1e-6)
+    assert torch.equal(processed["image_attention_mask"], torch.ones((2, 2), dtype=torch.bool))
 
 
 def test_siglip_gemma_value_model_forward(hf_stubs):

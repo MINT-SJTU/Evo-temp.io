@@ -98,16 +98,23 @@ class SiglipGemmaValuePreprocessor:
         )
 
     def _process_camera_batch(self, img_batch: Tensor, device: torch.device) -> Tensor:
-        img_batch = self._to_bchw(img_batch).detach().to(dtype=torch.float32, device="cpu")
-        do_rescale = not bool(torch.max(img_batch) <= 1.0 and torch.min(img_batch) >= 0.0)
-        image_list = [img_batch[i] for i in range(img_batch.shape[0])]
+        img_batch = self._normalize_to_bchw_cpu(img_batch)
+        return self._run_image_processor(img_batch, device=device)
 
-        processor_kwargs: dict[str, Any] = {"return_tensors": "pt", "do_rescale": do_rescale}
+    def _run_image_processor(self, img_batch: Tensor, device: torch.device) -> Tensor:
+        image_list = [img_batch[i] for i in range(img_batch.shape[0])]
+        processor_kwargs: dict[str, Any] = {"return_tensors": "pt", "do_rescale": False}
         processed = self.image_processor(images=image_list, **processor_kwargs)
         pixel_values = processed["pixel_values"]
         if not isinstance(pixel_values, torch.Tensor):
             raise TypeError("Image processor did not return tensor 'pixel_values'.")
         return pixel_values.to(device=device, dtype=torch.float32, non_blocking=True)
+
+    def _normalize_to_bchw_cpu(self, img_batch: Tensor) -> Tensor:
+        img_batch = self._to_bchw(img_batch).detach().to(dtype=torch.float32, device="cpu")
+        if float(torch.max(img_batch)) > 1.0 or float(torch.min(img_batch)) < 0.0:
+            img_batch = img_batch / 255.0
+        return img_batch
 
     def _prepare_images(self, raw_batch: dict[str, Any], device: torch.device) -> tuple[Tensor, Tensor]:
         present_img_keys = [key for key in self.camera_features if key in raw_batch]
@@ -117,19 +124,33 @@ class SiglipGemmaValuePreprocessor:
                 f"expected={self.camera_features} batch_keys={list(raw_batch.keys())}"
             )
 
-        reference_img = self._process_camera_batch(torch.as_tensor(raw_batch[present_img_keys[0]]), device=device)
-        bsize = reference_img.shape[0]
+        present_camera_batches: dict[str, Tensor] = {}
+        bsize: int | None = None
+        for key in present_img_keys:
+            img = self._normalize_to_bchw_cpu(torch.as_tensor(raw_batch[key]))
+            if bsize is None:
+                bsize = img.shape[0]
+            elif img.shape[0] != bsize:
+                raise ValueError(
+                    f"Mismatched batch size across cameras. Camera '{key}' has {img.shape[0]}, expected {bsize}."
+                )
+            present_camera_batches[key] = img
+
+        if bsize is None:
+            raise ValueError("Could not determine batch size from camera inputs.")
+
+        flat_present_images = torch.cat([present_camera_batches[key] for key in present_img_keys], dim=0)
+        processed_flat = self._run_image_processor(flat_present_images, device=device)
+        processed_splits = processed_flat.split(bsize, dim=0)
+        processed_by_camera = {key: processed_splits[i] for i, key in enumerate(present_img_keys)}
+
+        reference_img = processed_by_camera[present_img_keys[0]]
         image_tensors: list[Tensor] = []
         image_masks: list[Tensor] = []
 
         for key in self.camera_features:
-            if key in raw_batch:
-                img = self._process_camera_batch(torch.as_tensor(raw_batch[key]), device=device)
-                if img.shape[0] != bsize:
-                    raise ValueError(
-                        f"Mismatched batch size across cameras. Camera '{key}' has {img.shape[0]}, expected {bsize}."
-                    )
-                image_tensors.append(img)
+            if key in processed_by_camera:
+                image_tensors.append(processed_by_camera[key])
                 image_masks.append(torch.ones(bsize, dtype=torch.bool, device=device))
             else:
                 image_tensors.append(torch.zeros_like(reference_img))

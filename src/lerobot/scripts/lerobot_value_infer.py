@@ -15,6 +15,7 @@
 # limitations under the License.
 
 import logging
+import math
 from pathlib import Path
 from pprint import pformat
 from typing import Any
@@ -24,7 +25,7 @@ import torch
 from accelerate import Accelerator
 from accelerate.utils import DistributedDataParallelKwargs
 from huggingface_hub import snapshot_download
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Sampler
 from tqdm.auto import tqdm
 
 from lerobot.configs import parser
@@ -64,10 +65,48 @@ from lerobot.value.telemetry import (
 )
 
 
+class ContiguousDistributedEvalSampler(Sampler[int]):
+    """Distributed eval sampler with contiguous per-rank shards and deterministic tail padding."""
+
+    def __init__(self, dataset_size: int, num_replicas: int, rank: int):
+        if dataset_size <= 0:
+            raise ValueError(f"'dataset_size' must be > 0, got {dataset_size}.")
+        if num_replicas <= 0:
+            raise ValueError(f"'num_replicas' must be > 0, got {num_replicas}.")
+        if rank < 0 or rank >= num_replicas:
+            raise ValueError(f"'rank' must be in [0, {num_replicas - 1}], got {rank}.")
+
+        self.dataset_size = int(dataset_size)
+        self.num_replicas = int(num_replicas)
+        self.rank = int(rank)
+        self.num_samples = int(math.ceil(self.dataset_size / self.num_replicas))
+        self.total_size = self.num_samples * self.num_replicas
+
+    def __iter__(self):
+        shard_start = self.rank * self.num_samples
+        shard_end = min(shard_start + self.num_samples, self.dataset_size)
+        if shard_start >= self.dataset_size:
+            indices: list[int] = []
+        else:
+            indices = list(range(shard_start, shard_end))
+
+        if len(indices) < self.num_samples:
+            indices.extend([self.dataset_size - 1] * (self.num_samples - len(indices)))
+        return iter(indices)
+
+    def __len__(self) -> int:
+        return self.num_samples
+
+
+def _set_infer_logger_levels() -> None:
+    for logger_name in ["fsspec", "fsspec.local", "huggingface_hub", "datasets", "torchcodec"]:
+        logging.getLogger(logger_name).setLevel(logging.WARNING)
+
+
 def _create_accelerator(cfg: ValueInferencePipelineConfig, accelerator: Accelerator | None) -> Accelerator:
     if accelerator is not None:
         return accelerator
-    ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=True)
+    ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=False)
     force_cpu = cfg.runtime.device == "cpu"
     return Accelerator(step_scheduler_with_optimizer=False, kwargs_handlers=[ddp_kwargs], cpu=force_cpu)
 
@@ -298,7 +337,8 @@ def _init_value_runtime(
     accelerator.wait_for_everyone()
 
     log_file = value_output_dir / "value_infer.log" if accelerator.is_main_process else None
-    init_logging(log_file=log_file, accelerator=accelerator)
+    init_logging(log_file=log_file, file_level="INFO", accelerator=accelerator)
+    _set_infer_logger_levels()
 
     if accelerator.is_main_process:
         logging.info(pformat(cfg.to_dict()))
@@ -354,15 +394,21 @@ def run_value_inference_only_pipeline(
     shared = _prepare_shared_runtime(cfg, dataset, model_cfg, value_config_payload, device)
     inference_model.eval()
 
+    inference_sampler = ContiguousDistributedEvalSampler(
+        dataset_size=len(dataset),
+        num_replicas=accelerator.num_processes,
+        rank=accelerator.process_index,
+    )
     inference_loader = DataLoader(
         dataset,
         batch_size=max(cfg.runtime.batch_size, 64),
         shuffle=False,
+        sampler=inference_sampler,
         num_workers=cfg.runtime.num_workers,
         pin_memory=(device.type == "cuda"),
         drop_last=False,
     )
-    inference_model, inference_loader = accelerator.prepare(inference_model, inference_loader)
+    inference_model = accelerator.prepare(inference_model)
 
     if accelerator.is_main_process:
         max_abs_index = int(np.max(shared["absolute_indices"]))
@@ -373,6 +419,12 @@ def run_value_inference_only_pipeline(
         prediction_seen = None
 
     if accelerator.is_main_process:
+        logging.info(
+            "Contiguous eval sampler | num_samples_per_rank=%d total_size=%d dataset_size=%d",
+            inference_sampler.num_samples,
+            inference_sampler.total_size,
+            len(dataset),
+        )
         logging.info(
             "Start distributed value inference | world_size=%d local_batches=%d local_batch_size=%s",
             accelerator.num_processes,
@@ -411,111 +463,118 @@ def run_value_inference_only_pipeline(
 
     accelerator.wait_for_everyone()
     if not accelerator.is_main_process:
-        return {"world_size": int(accelerator.num_processes), "main_process": False}
+        result: dict[str, Any] = {"world_size": int(accelerator.num_processes), "main_process": False}
+    else:
+        if prediction_lookup is None or prediction_seen is None:
+            raise RuntimeError("Prediction buffers unexpectedly missing on main process.")
 
-    if prediction_lookup is None or prediction_seen is None:
-        raise RuntimeError("Prediction buffers unexpectedly missing on main process.")
+        missing_mask = ~prediction_seen[shared["absolute_indices"]]
+        if bool(np.any(missing_mask)):
+            missing_count = int(np.sum(missing_mask))
+            raise RuntimeError(f"Inference is missing predictions for {missing_count} frames.")
 
-    missing_mask = ~prediction_seen[shared["absolute_indices"]]
-    if bool(np.any(missing_mask)):
-        missing_count = int(np.sum(missing_mask))
-        raise RuntimeError(f"Inference is missing predictions for {missing_count} frames.")
+        predicted_values = prediction_lookup[shared["absolute_indices"]]
+        inference_stats, inference_sample_first_5 = log_inference_outputs(predicted_values)
 
-    predicted_values = prediction_lookup[shared["absolute_indices"]]
-    inference_stats, inference_sample_first_5 = log_inference_outputs(predicted_values)
+        advantages = compute_n_step_advantages(
+            rewards=shared["rewards"],
+            values=predicted_values,
+            episode_indices=shared["episode_indices"],
+            frame_indices=shared["frame_indices"],
+            n_step=cfg.acp.n_step,
+        )
+        thresholds = compute_task_thresholds(
+            task_indices=shared["task_indices"],
+            advantages=advantages,
+            positive_ratio=cfg.acp.positive_ratio,
+        )
+        indicators = binarize_advantages(
+            task_indices=shared["task_indices"],
+            advantages=advantages,
+            thresholds=thresholds,
+            interventions=shared["interventions"],
+            force_intervention_positive=cfg.acp.force_intervention_positive,
+        )
+        (
+            advantage_stats,
+            per_task_adv_stats,
+            indicator_positive_ratio_per_task,
+        ) = log_advantage_outputs(advantages, shared["task_indices"], thresholds, indicators)
 
-    advantages = compute_n_step_advantages(
-        rewards=shared["rewards"],
-        values=predicted_values,
-        episode_indices=shared["episode_indices"],
-        frame_indices=shared["frame_indices"],
-        n_step=cfg.acp.n_step,
-    )
-    thresholds = compute_task_thresholds(
-        task_indices=shared["task_indices"],
-        advantages=advantages,
-        positive_ratio=cfg.acp.positive_ratio,
-    )
-    indicators = binarize_advantages(
-        task_indices=shared["task_indices"],
-        advantages=advantages,
-        thresholds=thresholds,
-        interventions=shared["interventions"],
-        force_intervention_positive=cfg.acp.force_intervention_positive,
-    )
-    (
-        advantage_stats,
-        per_task_adv_stats,
-        indicator_positive_ratio_per_task,
-    ) = log_advantage_outputs(advantages, shared["task_indices"], thresholds, indicators)
+        columns = {
+            cfg.acp.value_field: predicted_values.astype(np.float32),
+            cfg.acp.advantage_field: advantages.astype(np.float32),
+            cfg.acp.indicator_field: indicators.astype(np.int64),
+        }
+        feature_infos = {
+            cfg.acp.value_field: {"dtype": "float32", "shape": (1,), "names": None},
+            cfg.acp.advantage_field: {"dtype": "float32", "shape": (1,), "names": None},
+            cfg.acp.indicator_field: {"dtype": "int64", "shape": (1,), "names": None},
+        }
+        write_modes = write_annotations_in_place(
+            dataset_root=Path(dataset.root),
+            frame_indices=shared["absolute_indices"],
+            columns=columns,
+            feature_infos=feature_infos,
+        )
+        log_write_modes(cfg, write_modes)
 
-    columns = {
-        cfg.acp.value_field: predicted_values.astype(np.float32),
-        cfg.acp.advantage_field: advantages.astype(np.float32),
-        cfg.acp.indicator_field: indicators.astype(np.int64),
-    }
-    feature_infos = {
-        cfg.acp.value_field: {"dtype": "float32", "shape": (1,), "names": None},
-        cfg.acp.advantage_field: {"dtype": "float32", "shape": (1,), "names": None},
-        cfg.acp.indicator_field: {"dtype": "int64", "shape": (1,), "names": None},
-    }
-    write_modes = write_annotations_in_place(
-        dataset_root=Path(dataset.root),
-        frame_indices=shared["absolute_indices"],
-        columns=columns,
-        feature_infos=feature_infos,
-    )
-    log_write_modes(cfg, write_modes)
+        positive_ratio_observed = float(np.mean(indicators.astype(np.float32)))
+        logging.info(
+            "Finished distributed value inference. indicator_positive_ratio=%.4f n_step=%d",
+            positive_ratio_observed,
+            cfg.acp.n_step,
+        )
+        diagnostics = build_diagnostics_payload(
+            cfg=cfg,
+            state_feature=shared["state_feature"],
+            task_feature=shared["task_index_feature"],
+            state_feature_exists=shared["state_feature_exists"],
+            task_feature_exists=shared["task_feature_exists"],
+            success_field_exists=shared["success_field_exists"],
+            intervention_field_exists=shared["intervention_field_exists"],
+            frame_count=shared["frame_count"],
+            episode_count=len(shared["episode_info"]),
+            num_tasks=shared["num_tasks"],
+            state_dim=shared["state_dim"],
+            per_task_episode=shared["per_task_episode"],
+            target_stats=shared["target_stats"],
+            reward_stats=shared["reward_stats"],
+            per_task_target_stats=shared["per_task_target_stats"],
+            per_task_reward_stats=shared["per_task_reward_stats"],
+            last_loss=float("nan"),
+            last_value_mae=float("nan"),
+            inference_stats=inference_stats,
+            inference_sample_first_5=inference_sample_first_5,
+            advantage_stats=advantage_stats,
+            per_task_adv_stats=per_task_adv_stats,
+            thresholds=thresholds,
+            indicator_positive_ratio_global=positive_ratio_observed,
+            indicator_positive_ratio_per_task=indicator_positive_ratio_per_task,
+            write_modes=write_modes,
+        )
+        diagnostics_path = save_diagnostics(value_output_dir / "diagnostics", diagnostics)
+        logging.info("Diagnostics saved | %s", diagnostics_path)
+        dataset_pushed_to_hub = _push_dataset_to_hub_if_enabled(cfg, dataset)
 
-    positive_ratio_observed = float(np.mean(indicators.astype(np.float32)))
-    logging.info(
-        "Finished distributed value inference. indicator_positive_ratio=%.4f n_step=%d",
-        positive_ratio_observed,
-        cfg.acp.n_step,
-    )
-    diagnostics = build_diagnostics_payload(
-        cfg=cfg,
-        state_feature=shared["state_feature"],
-        task_feature=shared["task_index_feature"],
-        state_feature_exists=shared["state_feature_exists"],
-        task_feature_exists=shared["task_feature_exists"],
-        success_field_exists=shared["success_field_exists"],
-        intervention_field_exists=shared["intervention_field_exists"],
-        frame_count=shared["frame_count"],
-        episode_count=len(shared["episode_info"]),
-        num_tasks=shared["num_tasks"],
-        state_dim=shared["state_dim"],
-        per_task_episode=shared["per_task_episode"],
-        target_stats=shared["target_stats"],
-        reward_stats=shared["reward_stats"],
-        per_task_target_stats=shared["per_task_target_stats"],
-        per_task_reward_stats=shared["per_task_reward_stats"],
-        last_loss=float("nan"),
-        last_value_mae=float("nan"),
-        inference_stats=inference_stats,
-        inference_sample_first_5=inference_sample_first_5,
-        advantage_stats=advantage_stats,
-        per_task_adv_stats=per_task_adv_stats,
-        thresholds=thresholds,
-        indicator_positive_ratio_global=positive_ratio_observed,
-        indicator_positive_ratio_per_task=indicator_positive_ratio_per_task,
-        write_modes=write_modes,
-    )
-    diagnostics_path = save_diagnostics(value_output_dir / "diagnostics", diagnostics)
-    logging.info("Diagnostics saved | %s", diagnostics_path)
-    dataset_pushed_to_hub = _push_dataset_to_hub_if_enabled(cfg, dataset)
+        result = {
+            "num_frames": int(shared["frame_count"]),
+            "num_episodes": int(len(shared["episode_info"])),
+            "indicator_positive_ratio": positive_ratio_observed,
+            "checkpoint_root": str(checkpoint_root),
+            "checkpoint_ref": checkpoint_ref,
+            "diagnostics_path": str(diagnostics_path),
+            "dataset_pushed_to_hub": dataset_pushed_to_hub,
+            "world_size": int(accelerator.num_processes),
+            "main_process": True,
+        }
 
-    return {
-        "num_frames": int(shared["frame_count"]),
-        "num_episodes": int(len(shared["episode_info"])),
-        "indicator_positive_ratio": positive_ratio_observed,
-        "checkpoint_root": str(checkpoint_root),
-        "checkpoint_ref": checkpoint_ref,
-        "diagnostics_path": str(diagnostics_path),
-        "dataset_pushed_to_hub": dataset_pushed_to_hub,
-        "world_size": int(accelerator.num_processes),
-        "main_process": True,
-    }
+    del inference_iter
+    del inference_loader
+    accelerator.wait_for_everyone()
+    if torch.distributed.is_available() and torch.distributed.is_initialized():
+        torch.distributed.destroy_process_group()
+    return result
 
 
 @parser.wrap()
