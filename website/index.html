@@ -3,10 +3,10 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Evo-RL | Real-Robot Reinforcement Learning</title>
+  <title>Evo-RL | Continuous Open-Source Real-World RL</title>
   <meta
     name="description"
-    content="Evo-RL is an open-source real-robot reinforcement learning stack built on top of LeRobot."
+    content="Evo-RL is a continuous open-source real-world RL program: LeRobot101 now, AgileX PiPER coming soon, community tasks next."
   />
   <link rel="stylesheet" href="./styles.css" />
 </head>
@@ -20,10 +20,10 @@
   <header class="top-nav">
     <a class="brand" href="#top">Evo-RL</a>
     <nav>
+      <a href="#positioning">Positioning</a>
       <a href="#pipeline">Pipeline</a>
-      <a href="#results">Results</a>
-      <a href="#demos">Demos</a>
-      <a href="#docs">Docs</a>
+      <a href="#current">Current</a>
+      <a href="#community">Community</a>
       <a href="#roadmap">Roadmap</a>
     </nav>
     <a class="nav-cta" href="https://github.com/Elvin-yk/evo-lerobot">GitHub</a>
@@ -31,32 +31,33 @@
 
   <main>
     <section class="section hero reveal" id="top">
-      <p class="eyebrow">Open-Source Real-Robot RL</p>
+      <p class="eyebrow">Continuous Open-Source Program</p>
       <h1>
-        Build, evaluate, and iterate real-world robot policies with
-        <span class="hero-accent">Evo-RL</span>.
+        Run a reproducible real-world RL loop on
+        <span class="hero-accent">SO101 today</span>,
+        and reuse it for AgileX PiPER next.
       </h1>
       <p class="hero-subtitle">
-        A practical reinforcement-learning workflow on top of LeRobot:
-        human-in-the-loop recording, value modeling, ACP annotation, and policy training.
+        To our current knowledge in the LeRobot open-source ecosystem, Evo-RL is the first continuously-updated real-world RL effort centered on LeRobot101 (SO101), with public iteration logs and upcoming AgileX PiPER support.
       </p>
+      <p class="hero-note">Star this repo to track model/data/benchmark updates.</p>
       <div class="hero-actions">
-        <a class="btn btn-primary" href="#demos">Watch Demo Slots</a>
-        <a class="btn btn-ghost" href="#docs">Get Started</a>
+        <a class="btn btn-primary" href="#docs">Run the SO101 baseline now</a>
+        <a class="btn btn-ghost" href="#community">Contribute your first task (3 steps)</a>
       </div>
 
       <div class="hero-metrics">
+        <article class="metric-card">
+          <p class="metric-label">Core RL file changes</p>
+          <p class="metric-value" data-count="101">101</p>
+        </article>
         <article class="metric-card">
           <p class="metric-label">D0 episodes</p>
           <p class="metric-value" data-count="300">300</p>
         </article>
         <article class="metric-card">
-          <p class="metric-label">Total frames</p>
-          <p class="metric-value" data-count="413134">413,134</p>
-        </article>
-        <article class="metric-card">
-          <p class="metric-label">Runtime hours</p>
-          <p class="metric-value" data-count="3.82">3.82</p>
+          <p class="metric-label">Last update</p>
+          <p class="metric-value">2026-02-26</p>
         </article>
       </div>
 
@@ -65,121 +66,164 @@
           <source src="./assets/placeholders/hero_demo.mp4" type="video/mp4" />
           Your browser does not support the video tag.
         </video>
-        <p class="slot-note">Placeholder: replace <code>assets/placeholders/hero_demo.mp4</code> with your lead demo.</p>
+        <p class="slot-note">Demo slot for official release video. Replace <code>assets/placeholders/hero_demo.mp4</code> before external announcement.</p>
+      </div>
+    </section>
+
+    <section class="section reveal" id="positioning">
+      <p class="eyebrow">Positioning</p>
+      <h2>What makes Evo-RL different</h2>
+      <div class="result-layout">
+        <div class="result-card">
+          <h3>Not a one-shot project</h3>
+          <ul>
+            <li>Continuous model/algorithm/data release cadence</li>
+            <li>Engineering-first real-world RL stack</li>
+            <li>Public progress over isolated demos</li>
+          </ul>
+        </div>
+        <div class="result-card">
+          <h3>Platform strategy</h3>
+          <ul>
+            <li>LeRobot101 (SO101): active and public now</li>
+            <li>AgileX PiPER robot arm: coming soon</li>
+            <li>Unified task upload ecosystem across platforms</li>
+          </ul>
+        </div>
       </div>
     </section>
 
     <section class="section reveal" id="pipeline">
       <p class="eyebrow">Pipeline</p>
-      <h2>One closed loop for real-world learning</h2>
+      <h2>One reusable loop for real-world RL</h2>
       <div class="pipeline-grid">
         <article class="stage-card">
           <span>01</span>
-          <h3>HIL Data Collection</h3>
-          <p>Collect teleop/policy trajectories with intervention and success labels.</p>
+          <h3>HIL Collection</h3>
+          <p>Collect trajectories with explicit intervention and outcome labels.</p>
         </article>
         <article class="stage-card">
           <span>02</span>
           <h3>Dataset Report</h3>
-          <p>Audit coverage, quality, episode lengths, and intervention ratios.</p>
+          <p>Audit quality before training, not after failure.</p>
         </article>
         <article class="stage-card">
           <span>03</span>
           <h3>Value Training</h3>
-          <p>Train a value model from trajectory outcomes and temporal context.</p>
+          <p>Learn value signals from real outcomes and long-horizon context.</p>
         </article>
         <article class="stage-card">
           <span>04</span>
-          <h3>ACP Annotation</h3>
-          <p>Write value, advantage, and binary indicators back into the dataset.</p>
+          <h3>Advantage-Indicator Annotation</h3>
+          <p>Write value/advantage/indicator back into the dataset.</p>
         </article>
         <article class="stage-card">
           <span>05</span>
-          <h3>Policy Update</h3>
-          <p>Train ACP-aware policies and deploy to real hardware for the next loop.</p>
+          <h3>Policy Iteration</h3>
+          <p>Train indicator-conditioned policy and return to real-world rollouts.</p>
         </article>
       </div>
     </section>
 
-    <section class="section reveal" id="results">
-      <p class="eyebrow">Experiment Snapshot</p>
-      <h2>Current benchmark card (replace with latest public numbers)</h2>
+    <section class="section reveal" id="current">
+      <p class="eyebrow">Current Public Scope</p>
+      <h2>What you can run today</h2>
       <div class="result-layout">
         <div class="result-card">
-          <h3>Data scaling setup</h3>
+          <h3>Current release</h3>
           <ul>
-            <li>Task: dual-arm SO101 towel folding</li>
-            <li>Dataset: 300 human demonstrations</li>
-            <li>Nested subsets: 25%, 50%, 75%, 100%</li>
-            <li>Comparison: LoRA vs Full fine-tuning</li>
+            <li>LeRobot101 / SO101 real-world RL loop</li>
+            <li>HIL + dataset report + value train/infer + indicator-conditioned policy train</li>
+            <li>Dual-arm practical experiments and iteration logs</li>
           </ul>
         </div>
         <div class="result-card">
-          <h3>Observed trend</h3>
+          <h3>Immediate next</h3>
           <ul>
-            <li>100% + Full FT currently outperforms tested LoRA variants</li>
-            <li>Several LoRA runs still near low/zero success in current setup</li>
-            <li>Use this as baseline before RL-loop scaling</li>
+            <li>AgileX PiPER adaptation (coming soon, <a href="https://www.agilex.ai/" target="_blank" rel="noreferrer">agilex.ai</a>)</li>
+            <li>Cross-platform task templates</li>
+            <li>Public benchmark cards with unified protocol</li>
           </ul>
         </div>
       </div>
       <figure class="figure-shell">
         <img src="./assets/placeholders/results_chart_placeholder.svg" alt="Results chart placeholder" />
-        <figcaption>Placeholder: replace with your public scaling curve, confidence intervals, and evaluation protocol.</figcaption>
+        <figcaption>Replace with official benchmark table (success rate, throughput, intervention ratio) for the current release.</figcaption>
       </figure>
     </section>
 
-    <section class="section reveal" id="demos">
-      <p class="eyebrow">Demo Gallery</p>
-      <h2>Video slots for paper-style project pages</h2>
-      <div class="demo-grid">
-        <article class="demo-card">
-          <video controls muted playsinline preload="none" poster="./assets/placeholders/demo_slot_poster.svg">
-            <source src="./assets/placeholders/demo_01.mp4" type="video/mp4" />
-          </video>
-          <h3>Demo A: Baseline policy</h3>
-          <p>Placeholder for failure modes and qualitative behavior.</p>
+    <section class="section reveal" id="community">
+      <p class="eyebrow">Community Program</p>
+      <h2>Submit one reproducible task in 3 steps (SO101 now, AgileX PiPER soon)</h2>
+      <div class="timeline">
+        <article>
+          <h3>Step 1</h3>
+          <p>Publish task setup + success metric using the template (about 10 min).</p>
         </article>
-        <article class="demo-card">
-          <video controls muted playsinline preload="none" poster="./assets/placeholders/demo_slot_poster.svg">
-            <source src="./assets/placeholders/demo_02.mp4" type="video/mp4" />
-          </video>
-          <h3>Demo B: Full FT model</h3>
-          <p>Placeholder for strongest baseline rollouts.</p>
+        <article>
+          <h3>Step 2</h3>
+          <p>Upload dataset + exact commands so others can reproduce.</p>
         </article>
-        <article class="demo-card">
-          <video controls muted playsinline preload="none" poster="./assets/placeholders/demo_slot_poster.svg">
-            <source src="./assets/placeholders/demo_03.mp4" type="video/mp4" />
-          </video>
-          <h3>Demo C: RL-loop iteration</h3>
-          <p>Placeholder for policy improvement across iterations.</p>
+        <article>
+          <h3>Step 3</h3>
+          <p>Submit result table + short video for leaderboard review.</p>
+        </article>
+      </div>
+      <div class="doc-links" style="margin-top: 18px;">
+        <a class="btn btn-ghost" href="https://github.com/Elvin-yk/evo-lerobot/issues">Open Issues</a>
+        <a class="btn btn-ghost" href="https://github.com/Elvin-yk/evo-lerobot/discussions">Open Discussions</a>
+      </div>
+    </section>
+
+    <section class="section reveal" id="roadmap">
+      <p class="eyebrow">Roadmap</p>
+      <h2>Current scope and beyond community</h2>
+      <div class="timeline">
+        <article>
+          <h3>Now</h3>
+          <p>LeRobot101 real-world RL baseline with continuous public updates.</p>
+        </article>
+        <article>
+          <h3>Coming Soon</h3>
+          <p>AgileX PiPER support with model + data + training recipes.</p>
+        </article>
+        <article>
+          <h3>Next</h3>
+          <p>Open community task upload ecosystem and cross-platform benchmark board.</p>
         </article>
       </div>
     </section>
 
     <section class="section reveal" id="docs">
-      <p class="eyebrow">Documentation</p>
-      <h2>Minimal commands to reproduce the workflow</h2>
+      <p class="eyebrow">Repro Entry</p>
+      <h2>Minimal commands to run the released loop</h2>
       <div class="code-panel">
 <pre><code># 1) HIL recording
+export DATASET_REPO_ID=&lt;your_dataset_repo_id&gt;
+
 lerobot-human-inloop-record \
   --robot.type=so100_follower \
   --teleop.type=so100_leader \
-  --dataset.repo_id=local/evo_demo
+  --dataset.repo_id=${DATASET_REPO_ID}
 
 # 2) Dataset report
-lerobot-dataset-report --dataset local/evo_demo --json
+lerobot-dataset-report --dataset ${DATASET_REPO_ID} --json
 
 # 3) Value train
 lerobot-value-train \
-  --dataset.repo_id=local/evo_demo \
+  --dataset.repo_id=${DATASET_REPO_ID} \
   --value.type=pistar06 \
   --steps=2000
 
-# 4) Value infer + ACP labels
+# 4) Value infer + indicator labels
 lerobot-value-infer \
-  --dataset.repo_id=local/evo_demo \
+  --dataset.repo_id=${DATASET_REPO_ID} \
   --inference.checkpoint_path=outputs/value_train/evo_value_demo \
+  --acp.enable=true
+
+# 5) Indicator-conditioned policy train
+lerobot-train \
+  --dataset.repo_id=${DATASET_REPO_ID} \
   --acp.enable=true</code></pre>
       </div>
       <div class="doc-links">
@@ -187,29 +231,10 @@ lerobot-value-infer \
         <a class="btn btn-ghost" href="https://github.com/Elvin-yk/evo-lerobot/tree/kye/main/docs/source">Open docs/source</a>
       </div>
     </section>
-
-    <section class="section reveal" id="roadmap">
-      <p class="eyebrow">Roadmap</p>
-      <h2>Release-ready open-source package checklist</h2>
-      <div class="timeline">
-        <article>
-          <h3>v0.1</h3>
-          <p>Open-source code release, command docs, and public experiment cards.</p>
-        </article>
-        <article>
-          <h3>v0.2</h3>
-          <p>Dual-arm benchmark suite, reproducibility scripts, and failure taxonomy.</p>
-        </article>
-        <article>
-          <h3>v0.3</h3>
-          <p>Safety gates for online RL and broader robot backend support.</p>
-        </article>
-      </div>
-    </section>
   </main>
 
   <footer class="site-footer">
-    <p>Built with Evo-RL on top of LeRobot. Replace placeholder media before public launch.</p>
+    <p>Evo-RL: continuous open-source real-world RL on LeRobot101, expanding to AgileX PiPER and community benchmarks.</p>
     <p><a href="#top">Back to top</a></p>
   </footer>
 

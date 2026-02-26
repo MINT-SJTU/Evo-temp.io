@@ -1,111 +1,125 @@
 # Evo-RL
 
 <p align="center">
-  <strong>Real-robot reinforcement learning on top of LeRobot.</strong><br/>
-  Human-in-the-loop collection, value learning, ACP indicator annotation, and policy training in one practical loop.
+  <strong>Open-source real-world RL toolkit for LeRobot101 (SO101), with continuous model, algorithm, and dataset releases.</strong><br/>
+  LeRobot101 is live now. AgileX PiPER robot-arm support is coming soon.
 </p>
 
 <p align="center">
   <a href="./website/index.html">Project Website</a> •
-  <a href="./docs/source">Docs Source</a> •
-  <a href="#quick-start">Quick Start</a> •
+  <a href="#reproduce-current-release">Reproduce Current Release</a> •
+  <a href="#community-program">Community Program</a> •
   <a href="./docs/outreach/wechat_push_draft_zh.md">WeChat Draft (ZH)</a>
 </p>
 
 <p align="center">
   <img alt="license" src="https://img.shields.io/badge/license-Apache--2.0-2ea44f"/>
   <img alt="python" src="https://img.shields.io/badge/python-3.10%2B-3776AB"/>
-  <img alt="status" src="https://img.shields.io/badge/status-active%20development-0A7EA4"/>
-  <img alt="robot" src="https://img.shields.io/badge/focus-real--robot%20RL-1f6feb"/>
+  <img alt="platform" src="https://img.shields.io/badge/platform-LeRobot101%20(SO101)-1f6feb"/>
+  <img alt="status" src="https://img.shields.io/badge/AgileX%20PiPER-coming%20soon-ff8f5b"/>
 </p>
 
-## Why Evo-RL
+## Positioning
 
-Evo-RL extends LeRobot for real-world RL workflows where pure behavior cloning is not enough.
+Evo-RL is a **continuous open-source program**, not a one-time demo release.
 
-It focuses on a production-minded closed loop:
+- Current platform: **LeRobot101 / SO101**.
+- Next platform: **AgileX PiPER robot arms** (coming soon, https://www.agilex.ai/).
+- Goal: build a community where tasks on both platforms can be uploaded, reproduced, and benchmarked with shared protocols.
 
-1. Collect real-robot trajectories with explicit success/failure and intervention signals.
-2. Train a value model from those trajectories.
-3. Annotate frame-level value/advantage/indicator back into the dataset.
-4. Train ACP-aware policies that consume those signals.
-5. Deploy, evaluate, collect new data, and iterate.
+## Core Selling Points
 
-## What Changed vs `main`
+1. To our knowledge (within current open-source LeRobot ecosystem), Evo-RL is the first project continuously pushing real-world RL releases on LeRobot101.
+2. End-to-end loop already implemented: data collection -> value -> indicator -> policy -> real-world re-collection.
+3. Engineering-first design: intervention/outcome labels, dataset quality report, indicator-conditioned training integration, and reproducible CLI chain.
+4. Community-first roadmap: open task uploads and cross-platform benchmark evolution.
 
-As of **February 26, 2026**, `main..kye/main` contains:
+## What Is Already Implemented
 
-- `102` files changed
-- `+6515 / -3333` lines
+As of commit `852b23cb` (2026-02-26), compared to `main`, core RL tooling includes:
 
-Key additions in this branch:
+- `101` core files changed (`website` and outreach files excluded)
+- `+6336 / -3224` lines
+- New CLIs:
+  - `lerobot-human-inloop-record`
+  - `lerobot-dataset-report`
+  - `lerobot-value-train`
+  - `lerobot-value-infer`
+- Indicator-conditioned policy path integrated into `lerobot-train`
+- Value/advantage/indicator write-back pipeline for iterative real-world training
 
-- Human-in-the-loop recording CLI with intervention and episode outcome labeling.
-- Dataset quality report CLI (`lerobot-dataset-report`).
-- Value training CLI (`lerobot-value-train`) and value inference CLI (`lerobot-value-infer`).
-- ACP prompt conditioning integration in `lerobot-train`.
-- Dual-arm SO101 teleop support and related tests.
+Recompute stats with:
+
+```bash
+git diff --shortstat main..kye/main -- . \
+  ':(exclude)website' \
+  ':(exclude)docs/outreach' \
+  ':(exclude).github/workflows/deploy-website-pages.yml' \
+  ':(exclude)README.md'
+```
 
 ## Core Pipeline
 
 ```text
-[Real-robot HIL collection]
-        |
-        v
-[Dataset quality check]
-        |
-        v
+[HIL collection on real robot]
+         |
+         v
+[Dataset quality report]
+         |
+         v
 [Value training]
-        |
-        v
-[Value/Adv/Indicator annotation]
-        |
-        v
-[ACP-aware policy training]
-        |
-        v
-[Real-robot evaluation and next iteration]
+         |
+         v
+[Value / Advantage / Indicator annotation]
+         |
+         v
+[Indicator-conditioned policy training]
+         |
+         v
+[Real-world rollout + next iteration]
 ```
 
-## Main Capabilities
+## Reproduce Current Release
 
-| Stage | CLI / Module | Output |
-|---|---|---|
-| HIL data collection | `lerobot-human-inloop-record` | `episode_success`, `collector_policy_id`, intervention traces |
-| Dataset inspection | `lerobot-dataset-report` | schema/quality/length histogram/success-failure ratios |
-| Value training | `lerobot-value-train` | value checkpoints |
-| Value inference | `lerobot-value-infer` | `complementary_info.value` (+ ACP fields when enabled) |
-| Policy training | `lerobot-train` + ACP hook | ACP-conditioned policy fine-tuning |
+### Tested environment
 
-## Installation
+- Ubuntu 22.04
+- Python 3.10
+- CUDA 12.x class environment
+- SO-series leader/follower arm + USB camera (640x480@30)
+
+### 1) Install
 
 ```bash
-git clone <your-fork-url> evo-rl
-cd evo-rl
+git clone https://github.com/Elvin-yk/evo-lerobot.git
+cd evo-lerobot
 conda activate lerobot
 pip install -e .
+pip install -e ".[pi]"      # value pipeline deps
+pip install -e ".[feetech]" # SO101 related deps
 ```
 
-Recommended extras:
+### 2) Prepare variables
 
 ```bash
-# value pipeline dependencies
-pip install -e ".[pi]"
-
-# SO100/SO101 hardware stack
-pip install -e ".[feetech]"
-```
-
-## Quick Start
-
-### 0) Shared vars
-
-```bash
-export DATASET_REPO_ID=local/evo_hil_pick_place_v0
+export DATASET_REPO_ID=<your_dataset_repo_id>
 export DATASET_ROOT=~/.cache/huggingface/lerobot
 ```
 
-### 1) HIL recording
+### 3) Hardware preflight (highly recommended)
+
+```bash
+lerobot-find-port
+lerobot-find-cameras
+```
+
+Confirm:
+
+- Correct follower/leader serial ports
+- Correct camera index/path
+- Current user has serial device permission
+
+### 4) Human-in-loop recording
 
 ```bash
 lerobot-human-inloop-record \
@@ -121,39 +135,25 @@ lerobot-human-inloop-record \
   --dataset.push_to_hub=false
 ```
 
-Optional policy-assisted mode:
+Hotkeys:
 
-```bash
-# append to the command above
---policy.path=<policy_repo_or_local_path> \
---acp_inference.enable=true \
---acp_inference.use_cfg=false
-```
-
-Default hotkeys:
-
-- `i`: toggle intervention takeover
+- `i`: toggle intervention
 - `s`: mark success and end episode
 - `f`: mark failure and end episode
 
-### 2) Dataset report
+### 5) Dataset quality report
 
 ```bash
-lerobot-dataset-report \
-  --dataset ${DATASET_REPO_ID} \
-  --root ${DATASET_ROOT}
+lerobot-dataset-report --dataset ${DATASET_REPO_ID} --root ${DATASET_ROOT}
+lerobot-dataset-report --dataset ${DATASET_REPO_ID} --root ${DATASET_ROOT} --json
 ```
 
-JSON mode:
+Expected output:
 
-```bash
-lerobot-dataset-report \
-  --dataset ${DATASET_REPO_ID} \
-  --root ${DATASET_ROOT} \
-  --json
-```
+- Terminal report with success/failure/intervention metrics
+- JSON report for logging and experiment cards
 
-### 3) Train value model
+### 6) Value training
 
 ```bash
 lerobot-value-train \
@@ -167,7 +167,11 @@ lerobot-value-train \
   --job_name=evo_value_demo
 ```
 
-### 4) Infer value/ACP labels and write back to dataset
+Expected output:
+
+- Value checkpoints under `outputs/value_train/evo_value_demo`
+
+### 7) Value infer + advantage-indicator labels
 
 ```bash
 lerobot-value-infer \
@@ -179,7 +183,14 @@ lerobot-value-infer \
   --acp.enable=true
 ```
 
-Optional overlay video export:
+Expected output:
+
+- Dataset fields written/updated:
+  - `complementary_info.value`
+  - `complementary_info.advantage`
+  - `complementary_info.acp_indicator`
+
+Optional visualization export:
 
 ```bash
 lerobot-value-infer \
@@ -193,62 +204,61 @@ lerobot-value-infer \
   --viz.output_dir=outputs/value_infer/viz
 ```
 
-## Current Real-World Snapshot (Replaceable)
+### 8) Indicator-conditioned policy training
 
-This section can be replaced by your latest public numbers.
+CLI flags use `--acp.*`, where `acp_indicator` is the binary advantage-indicator field.
 
-- Platform: dual-arm SO101 towel folding.
-- D0 dataset: `300` episodes, `413,134` frames, ~`3.82h` at `30 FPS`.
-- Scaling observation (current internal run): Full FT at 100% data reached non-zero success, while several LoRA variants lagged.
+```bash
+lerobot-train \
+  --dataset.repo_id=${DATASET_REPO_ID} \
+  --dataset.root=${DATASET_ROOT} \
+  --policy.type=pi05 \
+  --policy.pretrained_path=lerobot/pi05_base \
+  --acp.enable=true \
+  --acp.indicator_field=complementary_info.acp_indicator \
+  --steps=3000
+```
 
-For publication, prefer linking a structured experiment table on the project website.
+## Current Evidence Snapshot
 
-## Repository Layout
+- Platform: dual-arm SO101 task iteration
+- D0 dataset scale: `300` episodes, `413,134` frames, ~`3.82h` at `30 FPS`
+- Internal observed trend: `100% data + Full FT` forms a viable baseline in current setup
 
-Key Evo-RL components:
+More benchmark cards and protocol details are published on the project website as releases progress.
 
-- `src/lerobot/scripts/lerobot_human_inloop_record.py`
-- `src/lerobot/scripts/recording_hil.py`
-- `src/lerobot/scripts/recording_loop.py`
-- `src/lerobot/scripts/lerobot_dataset_report.py`
-- `src/lerobot/scripts/lerobot_value_train.py`
-- `src/lerobot/scripts/lerobot_value_infer.py`
-- `src/lerobot/values/pistar06/`
-- `src/lerobot/rl/acp_hook.py`
-- `src/lerobot/rl/acp_dataset_stats.py`
+## Community Program
 
-## Project Website
+We are opening a community track for tasks on:
 
-A polished, animated project page is included in [`website/`](./website/):
+- LeRobot101 (SO101)
+- AgileX PiPER robot arms (coming soon, https://www.agilex.ai/)
+
+Current submission flow:
+
+1. Open an Issue with task setup and success definition.
+2. Share dataset link + exact training/inference commands.
+3. Submit result table + short video for benchmark integration.
+
+## Website
+
+Project page is in [`website/`](./website/):
 
 ```bash
 cd website
 python -m http.server 8000
-# open http://localhost:8000
 ```
-
-All demo/media blocks are placeholders by design so you can drop in your final videos/figures.
-
-## Roadmap
-
-- Public release of dual-arm SO101 training/eval configs.
-- Standardized experiment cards (data budget, robot hours, success metrics).
-- Better safety tooling for intervention-heavy online RL loops.
-- Broader robot coverage beyond SO-series.
 
 ## Relationship to Upstream LeRobot
 
-- Evo-RL is a LeRobot-derived branch, not a clean-room rewrite.
-- Package/CLI namespace remains `lerobot` and `lerobot-*`.
-- Upstream sync/rebase is expected as LeRobot evolves.
+- This repository is LeRobot-derived and keeps the `lerobot-*` CLI namespace.
+- Evo-RL extends upstream with real-world RL loop tooling and continuous release workflow.
 
 ## Citation
 
-If Evo-RL is useful in your work, cite this repository and the upstream LeRobot project.
-
 ```bibtex
 @misc{evorl2026,
-  title        = {Evo-RL: Real-Robot Reinforcement Learning on top of LeRobot},
+  title        = {Evo-RL: Continuous Open-Source Real-World RL on LeRobot101 and Beyond},
   author       = {Evo-RL Contributors},
   year         = {2026},
   howpublished = {\url{https://github.com/Elvin-yk/evo-lerobot}}
