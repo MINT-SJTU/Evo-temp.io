@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="540" viewBox="0 0 960 540" role="img" aria-label="Demo slot placeholder">
+  <rect width="960" height="540" fill="#eef4fb"/>
+  <rect x="30" y="30" width="900" height="480" rx="20" fill="#ffffff" stroke="#d7e3f0"/>
+  <text x="480" y="265" text-anchor="middle" fill="#3b4e63" font-size="34" font-family="Manrope, sans-serif">Demo video placeholder</text>
+  <text x="480" y="305" text-anchor="middle" fill="#6a7a8a" font-size="22" font-family="Manrope, sans-serif">Drop demo_01.mp4 / demo_02.mp4 / demo_03.mp4 here</text>
+</svg>

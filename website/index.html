@@ -1,0 +1,218 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Evo-RL | Real-Robot Reinforcement Learning</title>
+  <meta
+    name="description"
+    content="Evo-RL is an open-source real-robot reinforcement learning stack built on top of LeRobot."
+  />
+  <link rel="stylesheet" href="./styles.css" />
+</head>
+<body>
+  <div class="bg-layer" aria-hidden="true">
+    <span class="orb orb-a"></span>
+    <span class="orb orb-b"></span>
+    <span class="orb orb-c"></span>
+  </div>
+
+  <header class="top-nav">
+    <a class="brand" href="#top">Evo-RL</a>
+    <nav>
+      <a href="#pipeline">Pipeline</a>
+      <a href="#results">Results</a>
+      <a href="#demos">Demos</a>
+      <a href="#docs">Docs</a>
+      <a href="#roadmap">Roadmap</a>
+    </nav>
+    <a class="nav-cta" href="https://github.com/Elvin-yk/evo-lerobot">GitHub</a>
+  </header>
+
+  <main>
+    <section class="section hero reveal" id="top">
+      <p class="eyebrow">Open-Source Real-Robot RL</p>
+      <h1>
+        Build, evaluate, and iterate real-world robot policies with
+        <span class="hero-accent">Evo-RL</span>.
+      </h1>
+      <p class="hero-subtitle">
+        A practical reinforcement-learning workflow on top of LeRobot:
+        human-in-the-loop recording, value modeling, ACP annotation, and policy training.
+      </p>
+      <div class="hero-actions">
+        <a class="btn btn-primary" href="#demos">Watch Demo Slots</a>
+        <a class="btn btn-ghost" href="#docs">Get Started</a>
+      </div>
+
+      <div class="hero-metrics">
+        <article class="metric-card">
+          <p class="metric-label">D0 episodes</p>
+          <p class="metric-value" data-count="300">300</p>
+        </article>
+        <article class="metric-card">
+          <p class="metric-label">Total frames</p>
+          <p class="metric-value" data-count="413134">413,134</p>
+        </article>
+        <article class="metric-card">
+          <p class="metric-label">Runtime hours</p>
+          <p class="metric-value" data-count="3.82">3.82</p>
+        </article>
+      </div>
+
+      <div class="video-shell">
+        <video controls muted playsinline preload="none" poster="./assets/placeholders/hero_demo_poster.svg">
+          <source src="./assets/placeholders/hero_demo.mp4" type="video/mp4" />
+          Your browser does not support the video tag.
+        </video>
+        <p class="slot-note">Placeholder: replace <code>assets/placeholders/hero_demo.mp4</code> with your lead demo.</p>
+      </div>
+    </section>
+
+    <section class="section reveal" id="pipeline">
+      <p class="eyebrow">Pipeline</p>
+      <h2>One closed loop for real-world learning</h2>
+      <div class="pipeline-grid">
+        <article class="stage-card">
+          <span>01</span>
+          <h3>HIL Data Collection</h3>
+          <p>Collect teleop/policy trajectories with intervention and success labels.</p>
+        </article>
+        <article class="stage-card">
+          <span>02</span>
+          <h3>Dataset Report</h3>
+          <p>Audit coverage, quality, episode lengths, and intervention ratios.</p>
+        </article>
+        <article class="stage-card">
+          <span>03</span>
+          <h3>Value Training</h3>
+          <p>Train a value model from trajectory outcomes and temporal context.</p>
+        </article>
+        <article class="stage-card">
+          <span>04</span>
+          <h3>ACP Annotation</h3>
+          <p>Write value, advantage, and binary indicators back into the dataset.</p>
+        </article>
+        <article class="stage-card">
+          <span>05</span>
+          <h3>Policy Update</h3>
+          <p>Train ACP-aware policies and deploy to real hardware for the next loop.</p>
+        </article>
+      </div>
+    </section>
+
+    <section class="section reveal" id="results">
+      <p class="eyebrow">Experiment Snapshot</p>
+      <h2>Current benchmark card (replace with latest public numbers)</h2>
+      <div class="result-layout">
+        <div class="result-card">
+          <h3>Data scaling setup</h3>
+          <ul>
+            <li>Task: dual-arm SO101 towel folding</li>
+            <li>Dataset: 300 human demonstrations</li>
+            <li>Nested subsets: 25%, 50%, 75%, 100%</li>
+            <li>Comparison: LoRA vs Full fine-tuning</li>
+          </ul>
+        </div>
+        <div class="result-card">
+          <h3>Observed trend</h3>
+          <ul>
+            <li>100% + Full FT currently outperforms tested LoRA variants</li>
+            <li>Several LoRA runs still near low/zero success in current setup</li>
+            <li>Use this as baseline before RL-loop scaling</li>
+          </ul>
+        </div>
+      </div>
+      <figure class="figure-shell">
+        <img src="./assets/placeholders/results_chart_placeholder.svg" alt="Results chart placeholder" />
+        <figcaption>Placeholder: replace with your public scaling curve, confidence intervals, and evaluation protocol.</figcaption>
+      </figure>
+    </section>
+
+    <section class="section reveal" id="demos">
+      <p class="eyebrow">Demo Gallery</p>
+      <h2>Video slots for paper-style project pages</h2>
+      <div class="demo-grid">
+        <article class="demo-card">
+          <video controls muted playsinline preload="none" poster="./assets/placeholders/demo_slot_poster.svg">
+            <source src="./assets/placeholders/demo_01.mp4" type="video/mp4" />
+          </video>
+          <h3>Demo A: Baseline policy</h3>
+          <p>Placeholder for failure modes and qualitative behavior.</p>
+        </article>
+        <article class="demo-card">
+          <video controls muted playsinline preload="none" poster="./assets/placeholders/demo_slot_poster.svg">
+            <source src="./assets/placeholders/demo_02.mp4" type="video/mp4" />
+          </video>
+          <h3>Demo B: Full FT model</h3>
+          <p>Placeholder for strongest baseline rollouts.</p>
+        </article>
+        <article class="demo-card">
+          <video controls muted playsinline preload="none" poster="./assets/placeholders/demo_slot_poster.svg">
+            <source src="./assets/placeholders/demo_03.mp4" type="video/mp4" />
+          </video>
+          <h3>Demo C: RL-loop iteration</h3>
+          <p>Placeholder for policy improvement across iterations.</p>
+        </article>
+      </div>
+    </section>
+
+    <section class="section reveal" id="docs">
+      <p class="eyebrow">Documentation</p>
+      <h2>Minimal commands to reproduce the workflow</h2>
+      <div class="code-panel">
+<pre><code># 1) HIL recording
+lerobot-human-inloop-record \
+  --robot.type=so100_follower \
+  --teleop.type=so100_leader \
+  --dataset.repo_id=local/evo_demo
+
+# 2) Dataset report
+lerobot-dataset-report --dataset local/evo_demo --json
+
+# 3) Value train
+lerobot-value-train \
+  --dataset.repo_id=local/evo_demo \
+  --value.type=pistar06 \
+  --steps=2000
+
+# 4) Value infer + ACP labels
+lerobot-value-infer \
+  --dataset.repo_id=local/evo_demo \
+  --inference.checkpoint_path=outputs/value_train/evo_value_demo \
+  --acp.enable=true</code></pre>
+      </div>
+      <div class="doc-links">
+        <a class="btn btn-ghost" href="https://github.com/Elvin-yk/evo-lerobot/blob/kye/main/README.md">Open README</a>
+        <a class="btn btn-ghost" href="https://github.com/Elvin-yk/evo-lerobot/tree/kye/main/docs/source">Open docs/source</a>
+      </div>
+    </section>
+
+    <section class="section reveal" id="roadmap">
+      <p class="eyebrow">Roadmap</p>
+      <h2>Release-ready open-source package checklist</h2>
+      <div class="timeline">
+        <article>
+          <h3>v0.1</h3>
+          <p>Open-source code release, command docs, and public experiment cards.</p>
+        </article>
+        <article>
+          <h3>v0.2</h3>
+          <p>Dual-arm benchmark suite, reproducibility scripts, and failure taxonomy.</p>
+        </article>
+        <article>
+          <h3>v0.3</h3>
+          <p>Safety gates for online RL and broader robot backend support.</p>
+        </article>
+      </div>
+    </section>
+  </main>
+
+  <footer class="site-footer">
+    <p>Built with Evo-RL on top of LeRobot. Replace placeholder media before public launch.</p>
+    <p><a href="#top">Back to top</a></p>
+  </footer>
+
+  <script src="./script.js"></script>
+</body>
+</html>
